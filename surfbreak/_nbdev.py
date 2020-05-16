@@ -2,7 +2,8 @@
 
 __all__ = ["index", "modules", "custom_doc_links", "git_url"]
 
-index = {"test_hello": "00_load_videos.ipynb"}
+index = {"get_surfdata": "00_load_videos.ipynb",
+         "surf_spots": "00_load_videos.ipynb"}
 
 modules = ["load_videos.py"]
 
