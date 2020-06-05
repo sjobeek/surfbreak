@@ -4,9 +4,14 @@ __all__ = ["index", "modules", "custom_doc_links", "git_url"]
 
 index = {"get_surfdata": "00_load_videos.ipynb",
          "SURF_SPOTS": "00_load_videos.ipynb",
-         "save_forecast_and_stream": "00_load_videos.ipynb"}
+         "save_forecast_and_stream": "00_load_videos.ipynb",
+         "decode_frame_sequence": "00_load_videos.ipynb",
+         "dense_optical_flow": "03_wave_detection.ipynb",
+         "heatmap_fit": "03_wave_detection.ipynb",
+         "trim_image": "03_wave_detection.ipynb"}
 
-modules = ["load_videos.py"]
+modules = ["load_videos.py",
+           "wave_detection.py"]
 
 doc_url = "https://sjobeek.github.io/surfbreak/"
 
