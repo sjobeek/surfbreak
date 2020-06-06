@@ -1,5 +1,4 @@
 # Custom stuff for this repo
-data/
 
 # Others
 *.bak
@@ -11,7 +10,6 @@ data/
 *~
 ~*
 _tmp*
-tmp*
 tags
 
 # Byte-compiled / optimized / DLL files
