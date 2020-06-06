@@ -11,10 +11,10 @@ jobs:
         architecture: 'x64'
     - name: Install the library
       run: |
-        add-apt-repository ppa:nilarimogard/webupd8
-        apt-get update
-        apt-get install streamlink
-        pip install opencv-python
+        sudo add-apt-repository ppa:nilarimogard/webupd8
+        sudo apt-get update
+        sudo apt-get install streamlink
+        sudo pip install opencv-python
         pip install nbdev jupyter
         pip install -e .
     - name: Read all notebooks
