@@ -24,7 +24,7 @@ def get_surfdata(spotid):
     return surf_data
 
 # Cell
-SURF_SPOTS = {"shirahama": {"cam_url": "https://www.youtube.com/watch?v=E6x_nn7k-Lc",
+SURF_SPOTS = {"shirahama": {"cam_url": "https://www.youtube.com/watch?v=xuP8xIbZvmo",
                             "spotid": "584204204e65fad6a77098c4"},
               "shinmaiko": {"cam_url": "https://www.youtube.com/watch?v=3dkBkAjNay4",  # A link to map location is on this page
                             "spotid": "584204204e65fad6a77097f3"} # This is actually for Isonoura, but closest available

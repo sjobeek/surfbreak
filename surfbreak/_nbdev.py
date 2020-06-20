@@ -11,9 +11,12 @@ index = {"get_surfdata": "00_load_videos.ipynb",
          "heatmap_fit": "02_wave_detection.ipynb",
          "trim_image": "03_perspective_transform.ipynb",
          "avg_wave_flows": "02_wave_detection.ipynb",
+         "fit_mean_flows": "02_wave_detection.ipynb",
+         "get_sample_start_times": "02_wave_detection.ipynb",
          "detect_surfzone": "02_wave_detection.ipynb",
          "normalized": "03_perspective_transform.ipynb",
-         "vector_tile": "03_perspective_transform.ipynb"}
+         "vector_tile": "03_perspective_transform.ipynb",
+         "fit_line": "03_perspective_transform.ipynb"}
 
 modules = ["load_videos.py",
            "detection.py",
