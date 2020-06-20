@@ -56,11 +56,12 @@ def heatmap_fit(input_heatmap, draw_fit=False):
     # apply camshift to get the new location
     ret, track_window = cv2.CamShift(prob_image, track_window, term_crit)
 
+    pts = cv2.boxPoints(ret)
+    pts = np.int0(pts)
     if draw_fit:
         import matplotlib.pyplot as plt
         # Draw it on image
-        pts = cv2.boxPoints(ret)
-        pts = np.int0(pts)
+
         img2 = cv2.polylines(frame.copy(),[pts],True, 1,2)
         plt.figure(figsize=(10,5))
         plt.imshow(img2)
@@ -84,7 +85,6 @@ import numpy as np
 import cv2
 import dask
 
-@dask.delayed
 def avg_wave_flows(video_file, start_s, duration_s=1):
     """Detects the region of the image which contains breaking waves.
     Returns a 2-tuple (mean_flow_x, mean_flow_y):
@@ -101,7 +101,6 @@ def avg_wave_flows(video_file, start_s, duration_s=1):
 
     return xy_cube.mean(axis=3)
 
-@dask.delayed
 def fit_mean_flows(avg_flows, draw_fit=False):
     mean_flow = np.stack(avg_flows,axis=3).mean(axis=3)
     mean_flow_mag = np.sqrt(mean_flow[:,:,0]*mean_flow[:,:,0] + mean_flow[:,:,1]*mean_flow[:,:,1])
@@ -125,4 +124,5 @@ def detect_surfzone(video_file, n_samples=10, processes=4, draw_fit=False, sched
     print("Video subsample start times (seconds):", start_times)
     average_flows = [avg_wave_flows(video_file, start_s=st, duration_s=1)
                      for st in start_times]
-    return fit_mean_flows(average_flows, draw_fit=True)
+    mean_flow, xrange, yrange = fit_mean_flows(average_flows, draw_fit=True)
+    return mean_flow, xrange, yrange
