@@ -16,11 +16,20 @@ index = {"get_surfdata": "00_load_videos.ipynb",
          "detect_surfzone": "02_wave_detection.ipynb",
          "normalized": "03_perspective_transform.ipynb",
          "vector_tile": "03_perspective_transform.ipynb",
-         "fit_line": "03_perspective_transform.ipynb"}
+         "fit_line": "03_perspective_transform.ipynb",
+         "graph_entry_to_string": "04_graph_utilities.ipynb",
+         "describe_graph": "04_graph_utilities.ipynb",
+         "short_func_label": "04_graph_utilities.ipynb",
+         "full_func_label": "04_graph_utilities.ipynb",
+         "func_node_name": "04_graph_utilities.ipynb",
+         "to_digraph": "04_graph_utilities.ipynb",
+         "digraph_to_png": "04_graph_utilities.ipynb",
+         "visualize": "04_graph_utilities.ipynb"}
 
 modules = ["load_videos.py",
            "detection.py",
-           "transform.py"]
+           "transform.py",
+           "graphutils.py"]
 
 doc_url = "https://sjobeek.github.io/surfbreak/"
 

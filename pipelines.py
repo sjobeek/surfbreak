@@ -6,8 +6,8 @@ import numpy
 import pprint as pp
 
 def vid_to_fit_mean_flow_graph(video_file, n_samples=10, duration_s=1, processes=4, draw_fit=False):
-    """Detects the region of the image which contains breaking waves, using cached graph 
-        Returns a 3-tuple (mean_flow_xy, xrange, yrange):"""
+    """Detects the region of the image which contains breaking waves. 
+        Returns a 3-tuple (mean_flow_xy_tensor, xrange, yrange):"""
 
     start_times = detection.get_sample_start_times(video_file, n_samples=n_samples)
     print("Video subsample start times (seconds):", start_times)
@@ -20,14 +20,6 @@ def vid_to_fit_mean_flow_graph(video_file, n_samples=10, duration_s=1, processes
     dask_graph = {**flow_tensor_nodes, **result}
     return dask_graph
 
-def graph_entry_to_string(graph_entry):
-    return graph_entry[0].__module__ + "." + graph_entry[0].__name__ + "(" +\
-           ", ".join(arg.__repr__() for arg in graph_entry[1:]) + ")"
-
-def describe_graph(dask_graph):
-    graph_description = {key: graph_entry_to_string(dask_graph[key])
-                         for key in dask_graph.keys()}
-    return graph_description
 
 if __name__ == "__main__":
     video = './tmp/shirahama_1590387334_SURF-93cm.ts'
