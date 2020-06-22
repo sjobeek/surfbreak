@@ -89,7 +89,7 @@ def video_length_s(stream_filepath):
     file_duration_s = frame_count/video_fps
     return file_duration_s
 
-def decode_frame_sequence(stream_filepath, duration_s=10, start_s=0, RGB=False, one_image_per_n_frames=2):
+def decode_frame_sequence(stream_filepath, duration_s=10, start_s=0, RGB=False, one_image_per_n_frames=4):
     cap = cv2.VideoCapture(stream_filepath)
     video_fps = cap.get(cv2.CAP_PROP_FPS)
     frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
