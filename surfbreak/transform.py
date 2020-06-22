@@ -3,7 +3,14 @@
 __all__ = ['normalized', 'shift_img', 'trim_image', 'fit_line', 'rotate_bound', 'flow_mag_at_point',
            'fit_surfzone_homography_points', 'pix_to_crop_from_dir', 'find_crop_range', 'image_flow_magnitude',
            'fit_homography_to_mean_flow', 'warp_trimmed_image', 'find_surfspot_calibration_params', 'normalize_image',
-           'plot_mean_flow_mag']
+           'plot_mean_flow_mag', 'run_surfcam_calibration', 'video_file_to_calibrated_image_tensors']
+
+# Cell
+from surfbreak import detection, graphutils, load_videos
+import pipelines
+import dask
+import graphchain
+import cv2
 
 # Cell
 import numpy as np
@@ -135,9 +142,9 @@ def pix_to_crop_from_dir(magnitude_img, crop_from, mass_crop_pct=0.05, backoff_p
 
 def find_crop_range(magnitude_img):
     """Returns cropped coordinates ((xmin,xmax), (ymin,ymax)) """
-    px_bottom = pix_to_crop_from_dir(mag_warped, 'bottom', mass_crop_pct=0.05, backoff_pct=0.2)
-    px_top =    pix_to_crop_from_dir(mag_warped, 'top',    mass_crop_pct=0.05, backoff_pct=0.4)
-    y_crop_mag = mag_warped[px_top : -1 - px_bottom]
+    px_bottom = pix_to_crop_from_dir(magnitude_img, 'bottom', mass_crop_pct=0.05, backoff_pct=0.2)
+    px_top =    pix_to_crop_from_dir(magnitude_img, 'top',    mass_crop_pct=0.05, backoff_pct=0.4)
+    y_crop_mag = magnitude_img[px_top : -1 - px_bottom]
     px_left  = pix_to_crop_from_dir(y_crop_mag, 'left',  mass_crop_pct=0.00001, backoff_pct=0, min_backoff_pix=1)
     px_right = pix_to_crop_from_dir(y_crop_mag, 'right', mass_crop_pct=0.00001, backoff_pct=0, min_backoff_pix=1)
     # Range defined
@@ -168,8 +175,8 @@ def find_surfspot_calibration_params(mean_flow, rx_range, ry_range):
     tx_range, ty_range = find_crop_range(mag_warped)
 
     surfspot_calibration_params = {
-        'crop_xrange': xrange,
-        'crop_yrange': yrange,
+        'crop_xrange': rx_range,
+        'crop_yrange': ry_range,
         'h_matrix': H,
         'warped_xrange':tx_range,
         'warped_yrange':ty_range
@@ -180,7 +187,7 @@ def find_surfspot_calibration_params(mean_flow, rx_range, ry_range):
 
 def normalize_image(image, crop_xrange, crop_yrange, h_matrix, warped_xrange, warped_yrange):
     trimmed_img = detection.trim_image(image, crop_xrange, crop_yrange)
-    warped_img = warp_trimmed_image(trimmed_img, H)
+    warped_img = warp_trimmed_image(trimmed_img, h_matrix)
     return warped_img[warped_yrange[0]:warped_yrange[1], warped_xrange[0]:warped_xrange[1]]
 
 
@@ -193,3 +200,28 @@ def plot_mean_flow_mag(meanflow_tensor, axis=None, title=None):
     else:
         plt.imshow(mean_flow_mag)
         plt.gca().set_title(title)
+
+# Cell
+def run_surfcam_calibration(calibration_videos, num_workers=3):
+    """Runs the optical flow fitting pipeline on the calibration videos, then uses the results
+       to calculate a set of calibration parameters used by `transform.normalize_image()`"""
+    video_mean_flows = []
+    for vid in calibration_videos:
+        flow_fit_graph = pipelines.vid_to_fit_mean_flow_graph(vid, n_samples=10, duration_s=2)
+
+        with dask.config.set(num_workers=num_workers):
+            meanflow, xyrange, yrange = graphchain.get(flow_fit_graph, 'result', scheduler=dask.threaded.get)
+        video_mean_flows.append(meanflow)
+
+    # Ignore the fit ranges from the individual videos, and re-fit across videos
+    acc_mean_flow, acc_xrange, acc_yrange = detection.fit_mean_flows(video_mean_flows, draw_fit=True)
+
+    calibration_params = find_surfspot_calibration_params(acc_mean_flow, acc_xrange, acc_yrange)
+    return calibration_params
+
+def video_file_to_calibrated_image_tensors(video_file, calibration_params, duration_s, start_s, one_image_per_n_frames=6):
+    frames = load_videos.decode_frame_sequence(video_file, duration_s=duration_s, start_s=start_s, RGB=True,
+                                                  one_image_per_n_frames=one_image_per_n_frames)
+    img_tensor = np.stack([normalize_image(frame, **calibration_params)
+                           for frame in frames], axis=3)
+    return img_tensor

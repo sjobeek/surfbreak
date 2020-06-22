@@ -42,9 +42,24 @@ def full_func_label(func, daskgraph_entry):
         else:
             args_repr.append(arg)
 
-    func_string_with_signature = pprint.pformat(func.__name__  + str(inspect.signature(func)), indent=4)[1:-1]
-    args_string = pprint.pformat(tuple(args_repr), indent=4)
+    # Ugly....  build up a string that replicates a normal python function call signature,
+    # dealing with all of graphviz's wonkyness (like \l for left-justified newlines...)
+    func_signature_segments = str(inspect.signature(func)).__repr__()[1:-1].split(', ')
+    func_signature_string = ""
+    cumulative_funcsig_len = len(func.__name__) + 1
+    for segment in func_signature_segments:
+        cumulative_funcsig_len += len(segment)
+        if cumulative_funcsig_len > 50:
+            cumulative_funcsig_len = 0
+            if segment[-1] == ")":
+                func_signature_string += segment + "   "
+            else:
+                func_signature_string += segment + ",\l" + 8*" "
+        else:
+            func_signature_string += segment + ",  "
 
+    func_string_with_signature = func.__name__  + func_signature_string[:-3]
+    args_string = pprint.pformat(tuple(args_repr), indent=4)
     # In raw graphviz labels, '\l' indicates a newline with the previous-line left-justified (\n is centered)
     return func_string_with_signature + "\l" + args_string
 
