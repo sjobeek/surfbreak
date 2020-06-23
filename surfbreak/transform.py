@@ -185,10 +185,14 @@ def find_surfspot_calibration_params(mean_flow, rx_range, ry_range):
     return surfspot_calibration_params
 
 
-def normalize_image(image, crop_xrange, crop_yrange, h_matrix, warped_xrange, warped_yrange):
+def normalize_image(image, crop_xrange, crop_yrange, h_matrix, warped_xrange, warped_yrange, greyscale=True):
     trimmed_img = detection.trim_image(image, crop_xrange, crop_yrange)
     warped_img = warp_trimmed_image(trimmed_img, h_matrix)
-    return warped_img[warped_yrange[0]:warped_yrange[1], warped_xrange[0]:warped_xrange[1]]
+    clipped_warped_img = warped_img[warped_yrange[0]:warped_yrange[1], warped_xrange[0]:warped_xrange[1]]
+    if greyscale:
+        return cv2.cvtColor(clipped_warped_img, cv2.COLOR_RGB2GRAY)
+    else:
+        return clipped_warped_img
 
 
 def plot_mean_flow_mag(meanflow_tensor, axis=None, title=None):
@@ -222,6 +226,6 @@ def run_surfcam_calibration(calibration_videos, num_workers=3):
 def video_file_to_calibrated_image_tensors(video_file, calibration_params, duration_s, start_s, one_image_per_n_frames=6):
     frames = load_videos.decode_frame_sequence(video_file, duration_s=duration_s, start_s=start_s, RGB=True,
                                                   one_image_per_n_frames=one_image_per_n_frames)
-    img_tensor = np.stack([normalize_image(frame, **calibration_params)
-                           for frame in frames], axis=3)
+    img_tensor = np.stack([normalize_image(frame, **calibration_params, greyscale=True)
+                           for frame in frames], axis=-1)
     return img_tensor

@@ -1,5 +1,5 @@
 #! /usr/bin/python3
-from surfbreak import detection, load_videos, transform
+from surfbreak import detection, load_videos, transform, supervision
 import dask
 import graphchain
 import numpy
@@ -52,6 +52,14 @@ def video_to_calibrated_image_tensor(video_filename, duration_s, start_s, surfsp
     }
     return dask_graph
     
+
+def video_to_waveform_slice(video_filename, duration_s, start_s, surfspot=None, calibration_videos=None):
+    """ Image tensors are 10hz by default (1/6th of the frames from a of 60Hz video)"""
+    dask_graph = video_to_calibrated_image_tensor(video_filename, duration_s, start_s, 
+                                                  surfspot=surfspot, calibration_videos=calibration_videos)
+    dask_graph['image_tensor'] = dask_graph['result']
+    dask_graph['result'] = (supervision.generate_waveform_slice, 'image_tensor')
+    return dask_graph
 
 if __name__ == "__main__":
     video = './tmp/shirahama_1590387334_SURF-93cm.ts'
