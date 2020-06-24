@@ -43,7 +43,6 @@ def video_to_calibrated_image_tensor(video_filename, duration_s, start_s, surfsp
                              'and both `surfspot` and `calibration_videos` are unspecified.\n'
                              'Please specify surfspot present in pipelines.SURFSPOT_CALIBRATION_VIDEOS.')
     if calibration_videos is None:
-        print("Using calibration paramters for " + surfspot)
         calibration_videos = SURFSPOT_CALIBRATION_VIDEOS[surfspot]
     
     dask_graph = {
