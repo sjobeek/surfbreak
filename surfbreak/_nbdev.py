@@ -44,13 +44,17 @@ index = {"get_surfdata": "00_load_videos.ipynb",
          "wavefront_diff_tensor": "05_waveform_supervision.ipynb",
          "dilate_tensor": "05_waveform_supervision.ipynb",
          "vertical_waveform_slice": "05_waveform_supervision.ipynb",
-         "generate_waveform_slice": "05_waveform_supervision.ipynb"}
+         "generate_waveform_slice": "05_waveform_supervision.ipynb",
+         "WaveformSliceDataset": "06_learn_1d_waveform.ipynb",
+         "slicedata_train": "06_learn_1d_waveform.ipynb",
+         "slicedata_valid": "06_learn_1d_waveform.ipynb"}
 
 modules = ["load_videos.py",
            "detection.py",
            "transform.py",
            "graphutils.py",
-           "supervision.py"]
+           "supervision.py",
+           "1d_waveform.py"]
 
 doc_url = "https://sjobeek.github.io/surfbreak/"
 

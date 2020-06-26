@@ -52,12 +52,13 @@ def video_to_calibrated_image_tensor(video_filename, duration_s, start_s, surfsp
     return dask_graph
     
 
-def video_to_waveform_slice(video_filename, duration_s, start_s, surfspot=None, calibration_videos=None):
+def video_to_waveform_slice(video_filename, duration_s, start_s, surfspot=None, calibration_videos=None, 
+                            slice_xrange=(30,50), output_dim=2):
     """ Image tensors are 10hz by default (1/6th of the frames from a of 60Hz video)"""
     dask_graph = video_to_calibrated_image_tensor(video_filename, duration_s, start_s, 
                                                   surfspot=surfspot, calibration_videos=calibration_videos)
     dask_graph['image_tensor'] = dask_graph['result']
-    dask_graph['result'] = (supervision.generate_waveform_slice, 'image_tensor')
+    dask_graph['result'] = (supervision.generate_waveform_slice, 'image_tensor', slice_xrange, output_dim)
     return dask_graph
 
 if __name__ == "__main__":

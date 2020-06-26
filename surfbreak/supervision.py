@@ -9,14 +9,19 @@ from matplotlib import animation
 from IPython.display import HTML
 import matplotlib.pyplot as plt
 
-def animate_tensor(image_tensor):
+def animate_tensor(image_tensor, colorbar=True):
     tensor_aspect = image_tensor.shape[0] / image_tensor.shape[1]
-    fig, ax = plt.subplots(figsize=(20,tensor_aspect*20))
+    if tensor_aspect < 1:
+        figsize = (20, tensor_aspect*20)
+    else:
+        figsize = (5/tensor_aspect, 5 + 1)
+    fig, ax = plt.subplots(figsize=figsize)
     img = ax.imshow(image_tensor[..., 0])
 
     norm = plt.Normalize()
     colors = plt.cm.jet(norm(image_tensor))
-    plt.colorbar(img, norm=colors)
+    if colorbar:
+        plt.colorbar(img, norm=colors, fraction=0.046, pad=0.04)
     def animate(i):
         img.set_data(image_tensor[... ,i])
 
@@ -67,11 +72,13 @@ def dilate_tensor(image_tensor, erode_size=2, dilation_size=5, clip_range=(0.1, 
         dilated_tensor[...,idx] = cv2.dilate(eroded_tensor, dilate_element)
     return dilated_tensor
 
-def vertical_waveform_slice(wavefront_tensor, xrange=(30,50)):
-    return wavefront_tensor[:,xrange[0]:xrange[1]].mean(axis=1)
-
+def vertical_waveform_slice(wavefront_tensor, xrange=(30,50), output_dim=2):
+    if output_dim == 2:
+        return wavefront_tensor[:,xrange[0]:xrange[1]].mean(axis=1)
+    elif output_dim == 3:
+        return wavefront_tensor[:,xrange[0]:xrange[1]]
 
 # Cell
-def generate_waveform_slice(image_tensor, slice_xrange=(30,50)):
-    dtensor = dilate_tensor(wavefront_diff_tensor(image_tensor))
-    return vertical_waveform_slice(dtensor, xrange=slice_xrange)
+def generate_waveform_slice(image_tensor, slice_xrange=(30,50), output_dim=2):
+    dtensor = dilate_tensor(wavefront_diff_tensor(image_tensor)).astype('float32')
+    return vertical_waveform_slice(dtensor, xrange=slice_xrange, output_dim=output_dim)
