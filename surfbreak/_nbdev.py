@@ -38,12 +38,19 @@ index = {"get_surfdata": "00_load_videos.ipynb",
          "func_node_name": "04_graph_utilities.ipynb",
          "to_digraph": "04_graph_utilities.ipynb",
          "digraph_to_png": "04_graph_utilities.ipynb",
-         "visualize": "04_graph_utilities.ipynb"}
+         "visualize": "04_graph_utilities.ipynb",
+         "normalize_tensor": "08_training_datasets.ipynb",
+         "get_wavefront_tensor_txy": "08_training_datasets.ipynb",
+         "get_mgrid": "08_training_datasets.ipynb",
+         "WaveformVideoDataset": "08_training_datasets.ipynb",
+         "subsample_strided_buckets": "08_training_datasets.ipynb",
+         "WaveformChunkDataset": "08_training_datasets.ipynb"}
 
 modules = ["load_videos.py",
            "detection.py",
            "transform.py",
-           "graphutils.py"]
+           "graphutils.py",
+           "datasets.py"]
 
 doc_url = "https://sjobeek.github.io/surfbreak/"
 

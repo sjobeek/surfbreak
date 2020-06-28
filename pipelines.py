@@ -58,6 +58,7 @@ def video_to_waveform_slice(video_filename, duration_s, start_s, surfspot=None, 
     dask_graph = video_to_calibrated_image_tensor(video_filename, duration_s, start_s, 
                                                   surfspot=surfspot, calibration_videos=calibration_videos)
     dask_graph['image_tensor'] = dask_graph['result']
+    dask_graph['clipped_image_tensor'] = (supervision.vertical_waveform_slice,'image_tensor', slice_xrange, output_dim)
     dask_graph['result'] = (supervision.generate_waveform_slice, 'image_tensor', slice_xrange, output_dim)
     return dask_graph
 
