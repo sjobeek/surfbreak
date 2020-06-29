@@ -50,11 +50,18 @@ def get_wavefront_tensor_txy(ydim_out, slice_xrange=(30,90), output_dim=3, start
 
 
 # Cell
-def get_mgrid(sidelen_tuple):
-    '''Generates a flattened grid of (t,x,y,...) coordinates in a range of -1 to 1.
+def get_mgrid(sidelen_tuple, tcoord_range=None):
+    '''Generates a flattened grid of (t,x,y) coordinates in a range of -1 to 1.
     sidelen_tuple: tuple of coordinate side lengths (t,x,y)
     '''
-    tensors = tuple([torch.linspace(-1, 1, steps=sidelen) for sidelen in sidelen_tuple])
+    if tcoord_range is None:
+        tensors = tuple([torch.linspace(-1, 1, steps=sidelen_tuple[0]),
+                         torch.linspace(-1, 1, steps=sidelen_tuple[1]),
+                         torch.linspace(-1, 1, steps=sidelen_tuple[2])])
+    else:
+        tensors = tuple([torch.linspace(*tcoord_range, steps=sidelen_tuple[0]),
+                         torch.linspace(-1, 1, steps=sidelen_tuple[1]),
+                         torch.linspace(-1, 1, steps=sidelen_tuple[2])])
     mgrid = torch.stack(torch.meshgrid(*tensors), dim=-1)
     mgrid = mgrid.reshape(-1, len(sidelen_tuple))
     return mgrid
@@ -67,9 +74,12 @@ class WaveformVideoDataset(Dataset):
         self.ydim = ydim
         self.xrange = xrange
         self.time_axis_scale = time_axis_scale
+        self.time_chunk_duration_s = time_chunk_duration_s
+        self.time_chunk_stride_s = time_chunk_stride_s
+        self.t_coords_per_second = 10 * time_axis_scale
 
-        self.video_chunk_timeranges = list((start, start+time_chunk_duration_s) for start in
-                                           range(start_s, end_s - time_chunk_duration_s, time_chunk_stride_s))
+        self.video_chunk_timeranges = np.array(list((start, start+time_chunk_duration_s) for start in
+                                                    range(start_s, end_s - time_chunk_duration_s, time_chunk_stride_s)))
 
     def __len__(self):
         return len(self.video_chunk_timeranges)
@@ -83,8 +93,15 @@ class WaveformVideoDataset(Dataset):
                                               start_s=item_start_s, duration_s=(item_end_s - item_start_s),
                                               time_axis_scale=self.time_axis_scale, target_graph_key="clipped_image_tensor")
 
-        # TODO: Decide on method for sharing the range of encoded time coordinates across chunks
-        all_coords = get_mgrid(full_wf_tensor.shape)
+        # For now, abstract time coordinates will be in centered minutes (so a 2 minute video spans -1 to 1, and a 30 minute video spans -15 to 15)
+        full_duration_s = self.video_chunk_timeranges.max() - self.video_chunk_timeranges.min()
+        full_tcoord_range = -((full_duration_s/60) / 2), ((full_duration_s/60) / 2)
+
+        this_chunk_tcoord_range = [self.video_chunk_timeranges[idx][0]/60 - full_tcoord_range[1],
+                                   self.video_chunk_timeranges[idx][1]/60 - full_tcoord_range[1]]
+
+
+        all_coords = get_mgrid(full_wf_tensor.shape, tcoord_range=this_chunk_tcoord_range)
 
 
         model_input = {
@@ -140,18 +157,23 @@ def subsample_strided_buckets(txyc_tensor, bucket_sidelength, samples_per_bucket
         return bstc
 
 class WaveformChunkDataset(Dataset):
-    def __init__(self, wf_video_dataset, video_index=0, xy_bucket_sidelen=20, samples_per_xy_bucket=10, time_sample_interval=4, dataset_length=1000):
+    def __init__(self, wf_video_dataset, video_index=0, xy_bucket_sidelen=20, samples_per_xy_bucket=10, time_sample_interval=4,
+                 steps_per_video_chunk=1000):
         self.wf_video_dataset = wf_video_dataset
         self.video_index = video_index
         self.xy_bucket_sidelen = xy_bucket_sidelen
         self.samples_per_xy_bucket = samples_per_xy_bucket
         self.time_sample_interval = time_sample_interval
-        self.dataset_length = dataset_length
+        self.steps_per_video_chunk = steps_per_video_chunk
 
     def __len__(self):
-        return self.dataset_length
+        return len(self.wf_video_dataset) * self.steps_per_video_chunk
 
     def __getitem__(self, idx):
+
+        video_idx = int(idx // self.steps_per_video_chunk)
+        t_idx = idx % self.steps_per_video_chunk
+
         model_input, ground_truth = self.wf_video_dataset[self.video_index]
         full_tensor_shape = ground_truth['full_tensor_shape']
         all_wf_values_txyc = ground_truth['all_wavefront_values'].reshape(*full_tensor_shape, 1)
@@ -160,16 +182,16 @@ class WaveformChunkDataset(Dataset):
         xy_subsampled_wf_values_bstc = subsample_strided_buckets(all_wf_values_txyc,
                                                                  bucket_sidelength=self.xy_bucket_sidelen,
                                                                  samples_per_bucket=self.samples_per_xy_bucket,
-                                                                 sample_offset=idx)
+                                                                 sample_offset=t_idx)
         xy_subsampled_coords_bstc =    subsample_strided_buckets(all_coords_txyc,
                                                                  bucket_sidelength=self.xy_bucket_sidelen,
                                                                  samples_per_bucket=self.samples_per_xy_bucket,
-                                                                 sample_offset=idx)
+                                                                 sample_offset=t_idx)
 
         ti = self.time_sample_interval
 
-        subsampled_wf_values_bstc = xy_subsampled_wf_values_bstc[:,:,idx%ti::ti,:]
-        subsampled_coords_bstc =       xy_subsampled_coords_bstc[:,:,idx%ti::ti,:]
+        subsampled_wf_values_bstc = xy_subsampled_wf_values_bstc[:,:,t_idx%ti::ti,:]
+        subsampled_coords_bstc =       xy_subsampled_coords_bstc[:,:,t_idx%ti::ti,:]
 
         model_input = {
             'coords': subsampled_coords_bstc.reshape(-1, 3)
@@ -181,6 +203,8 @@ class WaveformChunkDataset(Dataset):
             "wavefront_values": subsampled_wf_values_bstc.reshape(-1,1),
             "bst_shape": subsampled_wf_values_bstc.shape[:3],
             "timerange": ground_truth['timerange'],
-            'time_sampling_offset': idx%ti
+            'time_sampling_offset': t_idx%ti
+
         }
+
         return model_input, ground_truth
