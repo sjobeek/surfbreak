@@ -121,7 +121,7 @@ class WaveformVideoDataset(Dataset):
 
 # Cell
 def subsample_strided_buckets(txyc_tensor, bucket_sidelength, samples_per_bucket=100,
-                              return_xy_buckets=False, sample_offset=0):
+                              return_xy_buckets=False, sample_offset=0, filter_std_below=0.2):
     """Samples channel values form yxt tensors along bucketed spatial (x,y) dimensions.
        Leaves the time dimension the same. Return a tensor of dimensions (time, channel, buckets, samples)
        Input:  tensor (time, x, y, channels)
@@ -157,14 +157,15 @@ def subsample_strided_buckets(txyc_tensor, bucket_sidelength, samples_per_bucket
         return bstc
 
 class WaveformChunkDataset(Dataset):
-    def __init__(self, wf_video_dataset, video_index=0, xy_bucket_sidelen=20, samples_per_xy_bucket=10, time_sample_interval=4,
-                 steps_per_video_chunk=1000):
+    def __init__(self, wf_video_dataset, video_index=0, xy_bucket_sidelen=10, samples_per_xy_bucket=10, time_sample_interval=4,
+                 steps_per_video_chunk=1000, bucket_mask_minstd=0.2):
         self.wf_video_dataset = wf_video_dataset
         self.video_index = video_index
         self.xy_bucket_sidelen = xy_bucket_sidelen
         self.samples_per_xy_bucket = samples_per_xy_bucket
         self.time_sample_interval = time_sample_interval
         self.steps_per_video_chunk = steps_per_video_chunk
+        self.bucket_mask_minstd = bucket_mask_minstd
 
     def __len__(self):
         return len(self.wf_video_dataset) * self.steps_per_video_chunk
@@ -193,15 +194,22 @@ class WaveformChunkDataset(Dataset):
         subsampled_wf_values_bstc = xy_subsampled_wf_values_bstc[:,:,t_idx%ti::ti,:]
         subsampled_coords_bstc =       xy_subsampled_coords_bstc[:,:,t_idx%ti::ti,:]
 
+        # Filters out buckets with low standard deviation (probably just background ocean pixels - NOT waves)
+        n_buckets = subsampled_wf_values_bstc.shape[0]
+        bucket_mask = subsampled_wf_values_bstc.reshape(n_buckets,-1).std(dim=1) > self.bucket_mask_minstd
+
         model_input = {
-            'coords': subsampled_coords_bstc.reshape(-1, 3)
+            'coords': subsampled_coords_bstc.reshape(-1, 3),
+            'masked_coords': subsampled_coords_bstc[bucket_mask].reshape(-1, 3)
         }
 
         assert subsampled_wf_values_bstc.shape[:3] == subsampled_coords_bstc.shape[:3]
 
         ground_truth = {
             "wavefront_values": subsampled_wf_values_bstc.reshape(-1,1),
+            "masked_wf_values": subsampled_wf_values_bstc[bucket_mask].reshape(-1,1),
             "bst_shape": subsampled_wf_values_bstc.shape[:3],
+            "masked_bst_shape": subsampled_wf_values_bstc[bucket_mask].shape[:3],
             "timerange": ground_truth['timerange'],
             'time_sampling_offset': t_idx%ti
 
