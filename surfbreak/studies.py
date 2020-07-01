@@ -1,6 +1,7 @@
 import os
 import shutil
 import optuna
+import pytorch_lightning as pl
 from optuna.integration import PyTorchLightningPruningCallback
 
 class MetricsCallback(pl.Callback):
