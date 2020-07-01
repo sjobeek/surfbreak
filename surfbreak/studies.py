@@ -56,8 +56,8 @@ def run_waveform_hyperparam_search(n_trials=100, timeout=60*60, max_epochs=10, l
                                         
         model = LitSirenNet(hidden_features= trial.suggest_categorical('hidden_features', [128, 256]),
                             hidden_layers=3,
-                            first_omega_0=trial.suggest_loguniform('first_omega_0', 0.1, 10.),
-                            hidden_omega_0=trial.suggest_loguniform('hidden_omega_0', 0.1, 10.), 
+                            first_omega_0=trial.suggest_loguniform('first_omega_0', 0.1, 30.),
+                            hidden_omega_0=trial.suggest_loguniform('hidden_omega_0', 1., 30.), 
                             squared_slowness=3.0)
         trainer.fit(model)
 

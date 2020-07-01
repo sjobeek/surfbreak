@@ -21,8 +21,8 @@ import explore_siren as siren
 
 
         
-class LitSirenNet(pl.LightningModule):
-    def __init__(self, hidden_features=128, hidden_layers=3, first_omega_0=3, hidden_omega_0=0.3, squared_slowness=3.0,
+class LitSirenNet(pl.LightningModule):                       # Omega values extrapolate well (from some hyperparameter tuning studies)  
+    def __init__(self, hidden_features=256, hidden_layers=3, first_omega_0=3.8, hidden_omega_0=2.8, squared_slowness=3.0,
                  steps_per_vid_chunk=150, learning_rate=1e-4):
         """steps_per_vid_chunk defines the single-tensor resampled dataset length"""
         super().__init__()
