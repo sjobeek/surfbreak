@@ -126,6 +126,27 @@ def wave_pml(model_output, gt):
     return {'diff_constraint_hom': torch.abs(diff_constraint_hom).sum()}
 
 
+def wave_pml_2(waveform_values_out, coords_out, squared_slowness_tensor):
+    # coordinate channel order is (t, x, y)
+    x = coords_out           # (meta_batch_size, num_points, 3)  
+    y = waveform_values_out  # (meta_batch_size, num_points, 1)
+    batch_size = x.shape[1]
+
+    du, status = diff_operators.jacobian(y, x)
+    dudt = du[..., 0]
+
+    hess, status = diff_operators.jacobian(du[..., 0, :], x)
+    lap = hess[..., 1, 1, None] + hess[..., 2, 2, None]
+    dudt2 = hess[..., 0, 0, None]
+    diff_constraint_hom = dudt2 - 1 / squared_slowness_tensor * lap
+
+    # Can also get an estimate of the global squared slowness with some algebra
+    squared_slowness_est = 1 / (dudt2 * lap)
+
+    return {'diff_constraint_hom': torch.abs(diff_constraint_hom).sum(),
+            'squared_slowness_est':squared_slowness_est}
+
+
 def sdf(model_output, gt):
     '''
        x: batch of input coordinates
