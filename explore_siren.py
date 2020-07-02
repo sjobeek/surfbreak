@@ -93,11 +93,8 @@ class SineLayer(nn.Module):
     
 class Siren(nn.Module):
     def __init__(self, in_features, hidden_features, hidden_layers, out_features, outermost_linear=False, 
-                 first_omega_0=30, hidden_omega_0=30., squared_slowness=3.):
+                 first_omega_0=30, hidden_omega_0=30.):
         super().__init__()
-        
-        self.squared_slowness = torch.nn.Parameter(torch.tensor(float(squared_slowness)))
-        self.squared_slowness.requires_grad=True
 
         self.net = []
         self.net.append(SineLayer(in_features, hidden_features, 
