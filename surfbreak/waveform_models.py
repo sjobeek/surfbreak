@@ -42,8 +42,8 @@ class LitSirenNet(pl.LightningModule):    # With no gradient or wave loss, oemeg
                                             out_features=1, 
                                             hidden_features=64,
                                             hidden_layers=2, outermost_linear=True,
-                                            first_omega_0=1.5,
-                                            hidden_omega_0=10.)
+                                            first_omega_0=3.5, #1.5
+                                            hidden_omega_0=15.) #10.
 
         self.steps_per_vid_chunk=steps_per_vid_chunk
         self.learning_rate=learning_rate
@@ -82,9 +82,9 @@ class LitSirenNet(pl.LightningModule):    # With no gradient or wave loss, oemeg
                 wavespeed_loss = 0
             else:
                 slow_vals_out, slow_coords_out = self.slowness_model(model_input['masked_coords'][...,1:]) # Omit the first channel (time)
-                squared_slowness_tensor = slow_vals_out.repeat(1,1,3)
+                squared_slowness_tensor = slow_vals_out.repeat(1,1,3).clamp(min=1e-5) # do not allow negative or zero squared slowness values to ruin the physics
                 # Gently push towards known a good value for squared_slowness,                     and heavily penalize all nonsensical negative values
-                wavespeed_loss =  (slow_vals_out - self.squared_slowness).abs().mean()*self.wavespeed_loss_scale - slow_vals_out.clamp(max=0).mean()*10
+                wavespeed_loss =  (slow_vals_out - self.squared_slowness).abs().mean()*self.wavespeed_loss_scale - slow_vals_out.clamp(max=0).sum()
                 tensorboard_logs['train/wavespeed_loss'] = wavespeed_loss
                 assert squared_slowness_tensor.shape == coords_out.shape
             wave_loss_dict = wave_pml_2(wf_values_out, coords_out, squared_slowness_tensor)
