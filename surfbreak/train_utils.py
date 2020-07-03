@@ -33,6 +33,44 @@ def dump_tensors(gpu_only=True):
 			pass        
 	print("Total size:", total_size)
 
+
+def infer_xyslice(model, coords_txyc, slice_t_idx=0):
+	image_coords = coords_txyc[slice_t_idx].reshape(1, -1, 3)
+	wf_values_out, _ = model(image_coords)
+	image_vals_xy = wf_values_out.reshape(coords_txyc[slice_t_idx].shape[:-1])
+	return image_vals_xy
+
+def infer_tyslice(model, coords_txyc, slice_x_idx=None):
+	if slice_x_idx is None: # Get the center slice if no idx specified
+		slice_x_idx = coords_txyc.shape[1]//2
+	image_coords = coords_txyc[:,slice_x_idx].reshape(1, -1, 3)
+	wf_values_out, _ = model(image_coords)
+	image_vals_ty = wf_values_out.reshape(coords_txyc[:,slice_x_idx].shape[:-1])
+	return image_vals_ty
+
+def plot_waveform_tensors(model, coords_txyc, wavefronts_txy):
+	# Run the slice coordinates through the model to get the output samples
+	first_image =          infer_xyslice(model, coords_txyc, slice_t_idx=0)
+	left_tyslice_image =   infer_tyslice(model, coords_txyc, slice_x_idx=coords_txyc.shape[1]//4)
+	center_tyslice_image = infer_tyslice(model, coords_txyc, slice_x_idx=None) # Center by default
+	right_tyslice_image =  infer_tyslice(model, coords_txyc, slice_x_idx=(coords_txyc.shape[1]*3)//4)
+	tyslice_fullimg = torch.cat((left_tyslice_image, center_tyslice_image, right_tyslice_image), dim=0)
+	wavefront_tyslice = torch.cat((wavefronts_txy[:,coords_txyc.shape[1]//4], 
+								   wavefronts_txy[:,(coords_txyc.shape[1]*2)//4], 
+								   wavefronts_txy[:,(coords_txyc.shape[1]*3)//4]), dim=0)
+	# And plot them
+	fig, axes = plt.subplots(nrows=3, figsize=(10,10))
+	axes[0].imshow(first_image.cpu().T)
+	axes[0].set_title("first x,y slice")
+	axes[0].axvline(coords_txyc.shape[1]//4, color='grey', ls='--')
+	axes[0].axvline((coords_txyc.shape[1]*2)//4, color='grey', ls='--')
+	axes[0].axvline((coords_txyc.shape[1]*3)//4, color='grey', ls='--')
+	axes[1].imshow(tyslice_fullimg.cpu().T)
+	axes[1].set_title("t,y values over time (left, center, right)")
+	axes[2].imshow(wavefront_tyslice.cpu().T)
+	axes[2].set_title("t,y wavefront training signal (left, center, right")
+	return fig
+
 def waveform_tensors_plot(waveform_out_txy, waveform_gt_txy, coords):
 	assert waveform_out_txy.shape == waveform_gt_txy.shape
 	_, xdim, _ = waveform_out_txy.shape

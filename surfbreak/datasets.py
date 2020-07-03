@@ -81,42 +81,46 @@ class WaveformVideoDataset(Dataset):
 
         self.video_chunk_timeranges = np.array(list((start, start+time_chunk_duration_s) for start in
                                                     range(start_s, end_s - time_chunk_duration_s, time_chunk_stride_s)))
-
+        self.cached_chunk_data = None
+        self.cached_chunk_idx = None
+        
     def __len__(self):
         return len(self.video_chunk_timeranges)
 
     def __getitem__(self, idx):
-        item_start_s, item_end_s = self.video_chunk_timeranges[idx]
-        full_wf_tensor = get_wavefront_tensor_txy(self.ydim, slice_xrange=self.xrange, output_dim=3,
-                                              start_s=item_start_s, duration_s=(item_end_s - item_start_s),
-                                              time_axis_scale=self.time_axis_scale, target_graph_key="result")
-        full_vid_tensor = get_wavefront_tensor_txy(self.ydim, slice_xrange=self.xrange, output_dim=3,
-                                              start_s=item_start_s, duration_s=(item_end_s - item_start_s),
-                                              time_axis_scale=self.time_axis_scale, target_graph_key="clipped_image_tensor")
+        if idx != self.cached_chunk_idx:
+            item_start_s, item_end_s = self.video_chunk_timeranges[idx]
+            full_wf_tensor = get_wavefront_tensor_txy(self.ydim, slice_xrange=self.xrange, output_dim=3,
+                                                start_s=item_start_s, duration_s=(item_end_s - item_start_s),
+                                                time_axis_scale=self.time_axis_scale, target_graph_key="result")
+            full_vid_tensor = get_wavefront_tensor_txy(self.ydim, slice_xrange=self.xrange, output_dim=3,
+                                                start_s=item_start_s, duration_s=(item_end_s - item_start_s),
+                                                time_axis_scale=self.time_axis_scale, target_graph_key="clipped_image_tensor")
+            # For now, abstract time coordinates will be in centered minutes (so a 2 minute video spans -1 to 1, and a 30 minute video spans -15 to 15)
+            full_duration_s = self.video_chunk_timeranges.max() - self.video_chunk_timeranges.min()
+            full_tcoord_range = -((full_duration_s/60) / 2), ((full_duration_s/60) / 2)
 
-        # For now, abstract time coordinates will be in centered minutes (so a 2 minute video spans -1 to 1, and a 30 minute video spans -15 to 15)
-        full_duration_s = self.video_chunk_timeranges.max() - self.video_chunk_timeranges.min()
-        full_tcoord_range = -((full_duration_s/60) / 2), ((full_duration_s/60) / 2)
+            this_chunk_tcoord_range = [self.video_chunk_timeranges[idx][0]/60 - full_tcoord_range[1],
+                                    self.video_chunk_timeranges[idx][1]/60 - full_tcoord_range[1]]
 
-        this_chunk_tcoord_range = [self.video_chunk_timeranges[idx][0]/60 - full_tcoord_range[1],
-                                   self.video_chunk_timeranges[idx][1]/60 - full_tcoord_range[1]]
+            all_coords = get_mgrid(full_wf_tensor.shape, tcoord_range=this_chunk_tcoord_range)
 
+            model_input = {
+                'coords_txyc':all_coords.reshape(*full_vid_tensor.shape,3)
+            }
 
-        all_coords = get_mgrid(full_wf_tensor.shape, tcoord_range=this_chunk_tcoord_range)
+            assert full_vid_tensor.shape == full_wf_tensor.shape
+            ground_truth = {
+                "video_txy": full_vid_tensor,
+                "wavefronts_txy": full_wf_tensor,
+                "timerange": (item_start_s, item_end_s),
 
-
-        model_input = {
-            'all_coords':all_coords.reshape(-1,3)
-        }
-
-        assert full_vid_tensor.shape == full_wf_tensor.shape
-        ground_truth = {
-            "all_video_values": full_vid_tensor.reshape(-1,1),
-            "all_wavefront_values": full_wf_tensor.reshape(-1,1),
-            "full_tensor_shape": full_vid_tensor.shape,
-            "timerange": (item_start_s, item_end_s),
-
-        }
+            }
+            self.cached_chunk_idx = idx
+            self.cached_chunk_data = (model_input, ground_truth)
+        else:
+            model_input, ground_truth = self.cached_chunk_data
+            
         return model_input, ground_truth
 
 
@@ -167,7 +171,7 @@ class WaveformChunkDataset(Dataset):
         self.time_sample_interval = time_sample_interval
         self.steps_per_video_chunk = steps_per_video_chunk
         self.bucket_mask_minstd = bucket_mask_minstd
-
+    
     def __len__(self):
         return len(self.wf_video_dataset) * self.steps_per_video_chunk
 
@@ -177,11 +181,11 @@ class WaveformChunkDataset(Dataset):
         else:
             video_idx = self.video_index
         t_idx = idx % self.steps_per_video_chunk
+        
+        model_input, ground_truth = self.wf_video_dataset[video_idx] 
 
-        model_input, ground_truth = self.wf_video_dataset[video_idx]
-        full_tensor_shape = ground_truth['full_tensor_shape']
-        all_wf_values_txyc = ground_truth['all_wavefront_values'].reshape(*full_tensor_shape, 1)
-        all_coords_txyc = model_input['all_coords'].reshape(*full_tensor_shape, 3)
+        all_wf_values_txyc = ground_truth['wavefronts_txy'][..., None]
+        all_coords_txyc = model_input['coords_txyc']
 
         xy_subsampled_wf_values_bstc = subsample_strided_buckets(all_wf_values_txyc,
                                                                  bucket_sidelength=self.xy_bucket_sidelen,

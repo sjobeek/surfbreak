@@ -93,9 +93,9 @@ class SineLayer(nn.Module):
     
 class Siren(nn.Module):
     def __init__(self, in_features, hidden_features, hidden_layers, out_features, outermost_linear=False, 
-                 first_omega_0=30, hidden_omega_0=30.):
+                 first_omega_0=30, hidden_omega_0=30., softmax_output=False):
         super().__init__()
-
+        self.softmax_output=softmax_output
         self.net = []
         self.net.append(SineLayer(in_features, hidden_features, 
                                   is_first=True, omega_0=first_omega_0))
@@ -120,7 +120,10 @@ class Siren(nn.Module):
     
     def forward(self, coords):
         coords = coords.clone().detach().requires_grad_(True) # allows to take derivative w.r.t. input
-        output = self.net(coords)
+        if self.softmax_output:
+            output = torch.log(1.+torch.exp(self.net(coords)))
+        else:
+            output = self.net(coords)
         return output, coords
 
     def forward_with_activations(self, coords, retain_grad=False):
