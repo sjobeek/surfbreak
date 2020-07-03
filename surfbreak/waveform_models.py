@@ -26,10 +26,10 @@ from surfbreak.loss_functions import wave_pml_2
 class LitSirenNet(pl.LightningModule):    # With no gradient or wave loss, oemega values of (1, 5) work well (best at epochs 3~5)  
     def __init__(self, hidden_features=256, hidden_layers=3, first_omega_0=1.0, hidden_omega_0=5.0, squared_slowness=3.0,
                  steps_per_vid_chunk=150, learning_rate=1e-4, grad_loss_scale=1e-4, wavefunc_loss_scale=1e-7, 
-                 wavespeed_loss_scale=1e-2):
+                 wavespeed_loss_scale=1e-2, xrange=(10,130), timerange=(0,31), chunk_duration=30, chunk_stride=15):
         """steps_per_vid_chunk defines the single-tensor resampled dataset length"""
         super().__init__()
-        self.save_hyperparameters('first_omega_0', 'hidden_omega_0', 'squared_slowness', 'wavefunc_loss_scale', 'grad_loss_scale','wavespeed_loss_scale',
+        self.save_hyperparameters('first_omega_0', 'hidden_omega_0', 'squared_slowness', 'wavefunc_loss_scale', 'xrange', 'timerange', 'grad_loss_scale','wavespeed_loss_scale',
                                   'hidden_features', 'hidden_layers', 'steps_per_vid_chunk', 'learning_rate' )
         self.model = siren.Siren(in_features=3, 
                                  out_features=1, 
@@ -51,6 +51,10 @@ class LitSirenNet(pl.LightningModule):    # With no gradient or wave loss, oemeg
         self.squared_slowness = squared_slowness
         self.wavefunc_loss_scale=wavefunc_loss_scale
         self.wavespeed_loss_scale=wavespeed_loss_scale
+        self.timerange=timerange
+        self.chunk_duration=chunk_duration
+        self.chunk_stride=chunk_stride
+        self.xrange = xrange
         
         self.example_input_array = torch.ones(1,1337,3)
 
@@ -76,14 +80,18 @@ class LitSirenNet(pl.LightningModule):    # With no gradient or wave loss, oemeg
 
         if self.squared_slowness in [None, 0, 0.] or self.wavefunc_loss_scale in [None, 0, 0.]:
             wavefunc_loss = 0
+            wavespeed_loss = 0
         else:
             if self.wavespeed_loss_scale in [None, 0, 0.]:
                 squared_slowness_tensor = torch.ones_like(coords_out) * self.squared_slowness
                 wavespeed_loss = 0
             else:
                 slow_vals_out, slow_coords_out = self.slowness_model(model_input['masked_coords'][...,1:]) # Omit the first channel (time)
-                squared_slowness_tensor = slow_vals_out.repeat(1,1,3).clamp(min=1e-5) # do not allow negative or zero squared slowness values to ruin the physics
                 # Gently push towards known a good value for squared_slowness,                     and heavily penalize all nonsensical negative values
+                if False: # For the first few epochs, force a known reasonable squared_slowness
+                    squared_slowness_tensor = torch.ones_like(coords_out) * self.squared_slowness
+                else:
+                    squared_slowness_tensor = slow_vals_out.repeat(1,1,3).clamp(min=1e-5) # do not allow negative or zero squared slowness values to ruin the physics
                 wavespeed_loss =  (slow_vals_out - self.squared_slowness).abs().mean()*self.wavespeed_loss_scale - slow_vals_out.clamp(max=0).sum()
                 tensorboard_logs['train/wavespeed_loss'] = wavespeed_loss
                 assert squared_slowness_tensor.shape == coords_out.shape
@@ -99,43 +107,68 @@ class LitSirenNet(pl.LightningModule):    # With no gradient or wave loss, oemeg
 
     def validation_step(self, batch, batch_nb):
         # Ignore batch size, and always measure on the middle video (which spans the 'gap')
-        model_input, ground_truth = self.wf_valid_video_dataset[1]
-        cpu_model = self.model.cpu()
-        wf_values_out, coords_out = cpu_model(model_input['all_coords'])
-        loss = F.mse_loss(wf_values_out, ground_truth['all_wavefront_values'])
+        if False:  # Memory restrictions...  TODO: Fix as below!
+            model_input, ground_truth = self.wf_valid_video_dataset[0]
+            cpu_model = self.model.cpu()
+            wf_values_out, coords_out = cpu_model(model_input['all_coords'])
+            loss = F.mse_loss(wf_values_out, ground_truth['all_wavefront_values'])
+        else:
+            loss = torch.tensor(0) # TODO: Fix as below!
         return {'val_loss':loss}
 
     def validation_epoch_end(self, outputs):
 
-        model_input, ground_truth = self.wf_valid_video_dataset[1]
-        cpu_model = self.model.cpu()
-        wf_values_out, coords_out = cpu_model(model_input['all_coords'])        
-
+        model_input, ground_truth = self.wf_valid_video_dataset[0]
         wf_gt_txy = ground_truth['all_wavefront_values'].reshape(ground_truth['full_tensor_shape'])
-        wf_out_txy = wf_values_out.reshape(ground_truth['full_tensor_shape'])
-        fig = train_utils.waveform_tensors_plot(wf_out_txy, wf_gt_txy, coords=coords_out)
-        self.logger.experiment.add_figure('val_xyslice', fig, self.current_epoch)
+        all_coords_txyc = model_input['all_coords'].reshape((*ground_truth['full_tensor_shape'], 3))
+        cpu_model = self.model.cpu()
+        first_image_coords = all_coords_txyc[0].reshape(1, -1, 3)
+        first_wf_values_out, coords_out = cpu_model(first_image_coords) 
+        left_x_slice_coords = all_coords_txyc[:,all_coords_txyc.shape[1]//4,:].reshape(1, -1, 3)
+        right_x_slice_coords = all_coords_txyc[:,(all_coords_txyc.shape[1]*3)//4,:].reshape(1, -1, 3)
+        lxslice_values_out, lcoord_out = cpu_model(left_x_slice_coords)
+        rxslice_values_out, rcoord_out = cpu_model(right_x_slice_coords)
 
-        # Also plot one of the training dataset images
-        model_input, ground_truth =  self.wf_train_video_dataset[0]
-        wf_values_out, coords_out = cpu_model(model_input['all_coords'])
-        wf_gt_txy = ground_truth['all_wavefront_values'].reshape(ground_truth['full_tensor_shape']).cpu()
-        wf_out_txy = wf_values_out.reshape(ground_truth['full_tensor_shape']).cpu()
-        fig = train_utils.waveform_tensors_plot(wf_out_txy, wf_gt_txy, coords=coords_out)
-        self.logger.experiment.add_figure('train_xyslice', fig, self.current_epoch)
+        first_image_vals = first_wf_values_out.reshape(all_coords_txyc[0].shape[:-1])
+        lxslice_image_vals = lxslice_values_out.reshape(all_coords_txyc[:,all_coords_txyc.shape[1]//4].shape[:-1])
+        rxslice_image_vals = rxslice_values_out.reshape(all_coords_txyc[:,(all_coords_txyc.shape[1]*3)//4].shape[:-1])
+        xslice_img = torch.cat((lxslice_image_vals, rxslice_image_vals), dim=0)
+        fig0, axes = plt.subplots(nrows=2)
+        axes[0].imshow(first_image_vals.T)
+        axes[0].set_title("first x,y slice")
+        axes[1].imshow(xslice_img.T)
+        axes[1].set_title("t,y values over time (left, right 1/4)")
+        self.logger.experiment.add_figure('val_xyslice', fig0, self.current_epoch)
+
+        if False:  # Memory restrictions...  TODO: Fix as above!
+            wf_gt_txy = ground_truth['all_wavefront_values'].reshape(ground_truth['full_tensor_shape'])
+            wf_out_txy = wf_values_out.reshape(ground_truth['full_tensor_shape'])
+            fig = train_utils.waveform_tensors_plot(wf_out_txy, wf_gt_txy, coords=coords_out)
+            self.logger.experiment.add_figure('val_xyslice', fig, self.current_epoch)
+
+            # Also plot one of the training dataset images
+            model_input, ground_truth =  self.wf_train_video_dataset[0]
+            wf_values_out, coords_out = cpu_model(model_input['all_coords'])
+            wf_out_txy = wf_values_out.reshape(ground_truth['full_tensor_shape']).cpu()
+            fig = train_utils.waveform_tensors_plot(wf_out_txy, wf_gt_txy, coords=coords_out)
+            self.logger.experiment.add_figure('train_xyslice', fig, self.current_epoch)
 
         self.model.cuda()
 
-        # Calcuate and plot the inferred squared_slowness field in x and y
-        cpu_slow_model =self.slowness_model.cpu()
-        slow_vals_out, slow_coords_out = cpu_slow_model(model_input['all_coords'][...,1:]) # Omit the first channel (time)
-        slow_vals_txy = slow_vals_out.reshape(ground_truth['full_tensor_shape'])
-        fig2 = plt.figure()
-        plt.imshow(slow_vals_txy[0].detach().numpy().T)
-        plt.colorbar()
-        plt.title('Squared slowness estimate')
-        self.logger.experiment.add_figure('squared_slowness', fig2, self.current_epoch)
-        self.slowness_model.cuda()
+        if self.wavespeed_loss_scale not in [None, 0, 0.]:
+            # Calcuate and plot the inferred squared_slowness field in x and y
+            cpu_slow_model =self.slowness_model.cpu()
+            slow_vals_out, slow_coords_out = cpu_slow_model(model_input['all_coords'][...,1:]) # Omit the first channel (time)
+            slow_vals_txy = slow_vals_out.reshape(ground_truth['full_tensor_shape'])
+            slow_vals_array = slow_vals_txy[0].detach().numpy().T 
+            fig2 = plt.figure()
+            img = plt.imshow(slow_vals_array)
+            norm = plt.Normalize()
+            colors = plt.cm.jet(norm(slow_vals_array))
+            plt.colorbar(img, norm=colors, fraction=0.046, pad=0.15, orientation='horizontal')
+            plt.title('Squared slowness estimate')
+            self.logger.experiment.add_figure('squared_slowness', fig2, self.current_epoch)
+            self.slowness_model.cuda()
 
         avg_loss = sum(x["val_loss"] for x in outputs) / len(outputs)
 
@@ -151,14 +184,14 @@ class LitSirenNet(pl.LightningModule):    # With no gradient or wave loss, oemeg
     
     def setup(self, stage):
         # Train on a dataset consisting of 30-second chunks offset by 30 seconds
-        self.wf_train_video_dataset = WaveformVideoDataset(ydim=120, xrange=(10,130), timerange=(0,61), time_chunk_duration_s=30, 
-                                                     time_chunk_stride_s=30, time_axis_scale=0.5)
-        self.wf_train_chunk_dataset = WaveformChunkDataset(self.wf_train_video_dataset, xy_bucket_sidelen=20, samples_per_xy_bucket=10, 
+        self.wf_train_video_dataset = WaveformVideoDataset(ydim=120, xrange=self.xrange, timerange=self.timerange, time_chunk_duration_s=self.chunk_duration, 
+                                                     time_chunk_stride_s=self.chunk_stride, time_axis_scale=0.5)
+        self.wf_train_chunk_dataset = WaveformChunkDataset(self.wf_train_video_dataset, xy_bucket_sidelen=20, samples_per_xy_bucket=5, 
                                                      time_sample_interval=5, steps_per_video_chunk=self.steps_per_vid_chunk)
         # Validate on a dataset centered on the gap between the two training video chunks. Evaluate the MSE in this center area.
         # Having the same center timepoint will ensure the centered time representations are aligned between training and validation
-        self.wf_valid_video_dataset = WaveformVideoDataset(ydim=120, xrange=(10,130), timerange=(0,61), time_chunk_duration_s=20, 
-                                                     time_chunk_stride_s=20, time_axis_scale=0.5)
+        self.wf_valid_video_dataset = WaveformVideoDataset(ydim=120, xrange=self.xrange, timerange=self.timerange, time_chunk_duration_s=20, 
+                                                     time_chunk_stride_s=self.chunk_stride, time_axis_scale=0.5)
 
     def train_dataloader(self):
         return torch.utils.data.DataLoader(self.wf_train_chunk_dataset, batch_size=1, shuffle=True, num_workers=4)

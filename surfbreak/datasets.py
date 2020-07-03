@@ -54,13 +54,14 @@ def get_mgrid(sidelen_tuple, tcoord_range=None):
     '''Generates a flattened grid of (t,x,y) coordinates in a range of -1 to 1.
     sidelen_tuple: tuple of coordinate side lengths (t,x,y)
     '''
+    xscale = sidelen_tuple[1]/sidelen_tuple[2]
     if tcoord_range is None:
         tensors = tuple([torch.linspace(-1, 1, steps=sidelen_tuple[0]),
-                         torch.linspace(-1, 1, steps=sidelen_tuple[1]),
+                         torch.linspace(-xscale, xscale, steps=sidelen_tuple[1]),
                          torch.linspace(-1, 1, steps=sidelen_tuple[2])])
     else:
         tensors = tuple([torch.linspace(*tcoord_range, steps=sidelen_tuple[0]),
-                         torch.linspace(-1, 1, steps=sidelen_tuple[1]),
+                         torch.linspace(-xscale, xscale, steps=sidelen_tuple[1]),
                          torch.linspace(-1, 1, steps=sidelen_tuple[2])])
     mgrid = torch.stack(torch.meshgrid(*tensors), dim=-1)
     mgrid = mgrid.reshape(-1, len(sidelen_tuple))
@@ -157,7 +158,7 @@ def subsample_strided_buckets(txyc_tensor, bucket_sidelength, samples_per_bucket
         return bstc
 
 class WaveformChunkDataset(Dataset):
-    def __init__(self, wf_video_dataset, video_index=0, xy_bucket_sidelen=10, samples_per_xy_bucket=10, time_sample_interval=4,
+    def __init__(self, wf_video_dataset, video_index=None, xy_bucket_sidelen=10, samples_per_xy_bucket=10, time_sample_interval=4,
                  steps_per_video_chunk=1000, bucket_mask_minstd=0.2):
         self.wf_video_dataset = wf_video_dataset
         self.video_index = video_index
@@ -171,11 +172,13 @@ class WaveformChunkDataset(Dataset):
         return len(self.wf_video_dataset) * self.steps_per_video_chunk
 
     def __getitem__(self, idx):
-
-        video_idx = int(idx // self.steps_per_video_chunk)
+        if self.video_index is None:
+            video_idx = int(idx // self.steps_per_video_chunk)
+        else:
+            video_idx = self.video_index
         t_idx = idx % self.steps_per_video_chunk
 
-        model_input, ground_truth = self.wf_video_dataset[self.video_index]
+        model_input, ground_truth = self.wf_video_dataset[video_idx]
         full_tensor_shape = ground_truth['full_tensor_shape']
         all_wf_values_txyc = ground_truth['all_wavefront_values'].reshape(*full_tensor_shape, 1)
         all_coords_txyc = model_input['all_coords'].reshape(*full_tensor_shape, 3)
