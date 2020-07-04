@@ -1,5 +1,5 @@
 #! /usr/bin/python3
-from surfbreak import detection, load_videos, transform, supervision
+from surfbreak import detection, load_videos, transform, supervision, datasets
 import dask
 import graphchain
 import numpy
@@ -60,6 +60,25 @@ def video_to_waveform_slice(video_filename, duration_s, start_s, surfspot=None, 
     dask_graph['image_tensor'] = dask_graph['result']
     dask_graph['clipped_image_tensor'] = (supervision.vertical_waveform_slice,'image_tensor', slice_xrange, output_dim)
     dask_graph['result'] = (supervision.generate_waveform_slice, 'image_tensor', slice_xrange, output_dim)
+    return dask_graph
+
+
+def video_to_waveform_tensor(video_filename, ydim_out, slice_xrange=(30,90),
+                             start_s=0, duration_s=30, time_axis_scale=0.5, 
+                             output_dim=3, calibration_videos=None, surfspot=None):
+    
+    # Get a little more than the required duration for the raw video, then clip to the appropriate length
+    # (pre-processing with delta-time result 2 less samples)
+    """ Image tensors are 10hz by default (1/6th of the frames from a of 60Hz video)"""
+    dask_graph = video_to_calibrated_image_tensor(video_filename, duration_s+1, start_s, 
+                                                  surfspot=surfspot, calibration_videos=calibration_videos)
+    dask_graph['image_tensor'] = dask_graph['result']
+    dask_graph['clipped_image_tensor'] = (supervision.vertical_waveform_slice,'image_tensor', slice_xrange, output_dim)
+    dask_graph['scaled_video_tensor'] = (datasets.raw_wavefront_array_to_txy_tensor, 'clipped_image_tensor', ydim_out, duration_s, 
+                                         time_axis_scale, 10) #SAMPLING_HZ
+    dask_graph['waveform_slice'] = (supervision.generate_waveform_slice, 'image_tensor', slice_xrange, output_dim)
+    dask_graph['result'] = (datasets.raw_wavefront_array_to_txy_tensor, 'waveform_slice', ydim_out, duration_s, 
+                             time_axis_scale, 10, 1.0) #SAMPLING_HZ, clip_max (clipping wavefronts to max 1.0 very important)
     return dask_graph
 
 if __name__ == "__main__":

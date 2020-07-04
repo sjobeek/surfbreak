@@ -101,6 +101,7 @@ class LitSirenNet(pl.LightningModule):    # With no gradient or wave loss, oemeg
         train_loss = mse_loss + avg_loss + grad_loss + laplace_loss + grad_loss + laplace_loss + wavefunc_loss + wavespeed_loss
 
         tensorboard_logs['train/loss'] = train_loss
+        tensorboard_logs['train/sample_fraction'] = self.wf_train_chunk_dataset.sample_fraction 
 
         return {'loss': train_loss, 'log': tensorboard_logs}
 
@@ -108,21 +109,19 @@ class LitSirenNet(pl.LightningModule):    # With no gradient or wave loss, oemeg
         model_input, ground_truth = batch
         bdim, tdim, xdim, ydim, channels = model_input['coords_txyc'].shape
         # Evaluate only on the center 1/2 of coordinate values (where valid wave data is likely)
-        eval_coords = model_input['coords_txyc'][:, xdim//4:-xdim//4, ydim//4:-ydim//4, :].reshape(1,-1,channels)
+        stp = 3 # Step skipped between t,x,ycoordinates to evaluate (just to reduce memory usage)
+        eval_coords = model_input['coords_txyc'][::stp, xdim//4:-xdim//4:stp, ydim//4:-ydim//4:stp, :].reshape(1,-1,channels)
         wf_values_out, coords_out = self.model(eval_coords)
-        loss = F.mse_loss(wf_values_out, ground_truth['wavefronts_txy'][:, xdim//4:-xdim//4, ydim//4:-ydim//4].reshape(1,-1,1))
-        return {'val_loss':loss}
+        loss = F.mse_loss(wf_values_out, ground_truth['wavefronts_txy'][::stp, xdim//4:-xdim//4:stp, ydim//4:-ydim//4:stp].reshape(1,-1,1))
 
+        coords_txyc = model_input['coords_txyc'][0]        # Removing the batch dimension
+        wavefronts_txy = ground_truth['wavefronts_txy'][0] # Removing the batch dimension
+        first_video_image_xy = ground_truth['video_txy'][0,0] # First batch, first image
+        fig0 = train_utils.plot_waveform_tensors(self.model, coords_txyc, wavefronts_txy, first_video_image_xy)
+        self.logger.experiment.add_figure(f'valchunk{batch_nb}/waveforms', fig0, self.current_epoch)
 
-    def validation_epoch_end(self, outputs):
-
-        model_input, ground_truth = self.wf_valid_video_dataset[len(self.wf_valid_video_dataset)//2]
-        coords_txyc = model_input['coords_txyc'].cuda()
-        wavefronts_txy = ground_truth['wavefronts_txy'].cuda()
-        fig0 = train_utils.plot_waveform_tensors(self.model, coords_txyc, wavefronts_txy)
-        self.logger.experiment.add_figure('waveforms', fig0, self.current_epoch)
-
-        if self.wavespeed_loss_scale not in [None, 0, 0.]:
+        # Squared slowness estimate is independent of batch, so only calculate this once
+        if batch_nb==0 and self.wavespeed_loss_scale not in [None, 0, 0.]:
             # Calcuate and plot the inferred squared_slowness field in x and y
             slow_vals_out, _ = self.slowness_model(coords_txyc[0,:,:,1:].reshape(-1,2)) # Skipping the first T channel
             slow_vals_array = slow_vals_out.reshape(coords_txyc[0,:,:,0].shape).cpu().detach().numpy()
@@ -136,11 +135,25 @@ class LitSirenNet(pl.LightningModule):    # With no gradient or wave loss, oemeg
             self.logger.experiment.add_figure('squared_slowness', fig2, self.current_epoch)
             self.slowness_model.cuda()
 
+
+
+        return {'val_loss':loss}
+
+
+    def validation_epoch_end(self, outputs):
+
+        
+
         avg_loss = sum(x["val_loss"] for x in outputs) / len(outputs)
 
         # Pass the accuracy to the `DictLogger` via the `'log'` key.
         tensorboard_logs = {'val/avg_loss': avg_loss}
+
         return {"val_loss": avg_loss, "log":tensorboard_logs}
+
+    def on_epoch_end(self):
+        # Add half of a chunk's worth of samples to the current training batch each epoch
+        self.wf_train_chunk_dataset.sample_fraction = min(1.0, self.wf_train_chunk_dataset.sample_fraction + 0.5/len(self.wf_train_video_dataset))
 
     def configure_optimizers(self):
         if self.wavespeed_loss_scale not in [None, 0, 0.]:
@@ -152,15 +165,19 @@ class LitSirenNet(pl.LightningModule):    # With no gradient or wave loss, oemeg
         # Train on a dataset consisting of 30-second chunks offset by 30 seconds
         self.wf_train_video_dataset = WaveformVideoDataset(ydim=120, xrange=self.xrange, timerange=self.timerange, time_chunk_duration_s=self.chunk_duration, 
                                                      time_chunk_stride_s=self.chunk_stride, time_axis_scale=0.5)
+        n_vid_chunks = len(self.wf_train_video_dataset)
         self.wf_train_chunk_dataset = WaveformChunkDataset(self.wf_train_video_dataset, xy_bucket_sidelen=20, samples_per_xy_bucket=5, 
-                                                     time_sample_interval=5, steps_per_video_chunk=self.steps_per_vid_chunk)
-        # Validate on a dataset centered on the gap between the two training video chunks. Evaluate the MSE in this center area.
+                                                     time_sample_interval=5, steps_per_video_chunk=self.steps_per_vid_chunk,
+                                                     sample_fraction=1.0/n_vid_chunks)
+        # Validate on three chunks spread along the full time duration.
         # Having the same center timepoint will ensure the centered time representations are aligned between training and validation
-        self.wf_valid_video_dataset = WaveformVideoDataset(ydim=120, xrange=self.xrange, timerange=self.timerange, time_chunk_duration_s=30, 
-                                                     time_chunk_stride_s=(self.timerange[1]-self.timerange[0])//3, time_axis_scale=0.5)
+        self.wf_valid_video_dataset = WaveformVideoDataset(ydim=120, xrange=self.xrange, timerange=self.timerange, time_chunk_duration_s=self.chunk_duration, 
+                                                           time_chunk_stride_s=(self.timerange[1]-self.timerange[0])//3, time_axis_scale=0.5)
+
 
     def train_dataloader(self):
-        return torch.utils.data.DataLoader(self.wf_train_chunk_dataset, batch_size=1, shuffle=True, num_workers=4)
+                                                        # Shuffling is handled by the chunk_dataset when sample_fraction < 1.0
+        return torch.utils.data.DataLoader(self.wf_train_chunk_dataset, batch_size=1, shuffle=False, num_workers=4)
 
     def val_dataloader(self):
         return torch.utils.data.DataLoader(self.wf_valid_video_dataset, batch_size=1, shuffle=False, num_workers=4)

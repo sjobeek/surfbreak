@@ -48,7 +48,7 @@ def infer_tyslice(model, coords_txyc, slice_x_idx=None):
 	image_vals_ty = wf_values_out.reshape(coords_txyc[:,slice_x_idx].shape[:-1])
 	return image_vals_ty
 
-def plot_waveform_tensors(model, coords_txyc, wavefronts_txy):
+def plot_waveform_tensors(model, coords_txyc, wavefronts_txy, image_xy):
 	# Run the slice coordinates through the model to get the output samples
 	first_image =          infer_xyslice(model, coords_txyc, slice_t_idx=0)
 	left_tyslice_image =   infer_tyslice(model, coords_txyc, slice_x_idx=coords_txyc.shape[1]//4)
@@ -59,16 +59,23 @@ def plot_waveform_tensors(model, coords_txyc, wavefronts_txy):
 								   wavefronts_txy[:,(coords_txyc.shape[1]*2)//4], 
 								   wavefronts_txy[:,(coords_txyc.shape[1]*3)//4]), dim=0)
 	# And plot them
-	fig, axes = plt.subplots(nrows=3, figsize=(10,10))
-	axes[0].imshow(first_image.cpu().T)
-	axes[0].set_title("first x,y slice")
-	axes[0].axvline(coords_txyc.shape[1]//4, color='grey', ls='--')
-	axes[0].axvline((coords_txyc.shape[1]*2)//4, color='grey', ls='--')
-	axes[0].axvline((coords_txyc.shape[1]*3)//4, color='grey', ls='--')
-	axes[1].imshow(tyslice_fullimg.cpu().T)
-	axes[1].set_title("t,y values over time (left, center, right)")
-	axes[2].imshow(wavefront_tyslice.cpu().T)
-	axes[2].set_title("t,y wavefront training signal (left, center, right")
+	tmin = coords_txyc[...,0].min() # Coordinate channels are (t,x,y)
+	tmax = coords_txyc[...,0].max()
+	fig, axes = plt.subplots(nrows=4, figsize=(10,10))
+	axes[0].imshow(image_xy.cpu().T)
+	axes[0].set_title("first image from video")
+	axes[0].set_xticklabels([]) # Prevent x coordinate values from covering text
+	axes[1].imshow(first_image.cpu().T)
+	axes[1].set_title("first x,y slice of inferred waveform")
+	axes[1].axvline(coords_txyc.shape[1]//4, color='grey', ls='--')
+	axes[1].axvline((coords_txyc.shape[1]*2)//4, color='grey', ls='--')
+	axes[1].axvline((coords_txyc.shape[1]*3)//4, color='grey', ls='--')
+	axes[1].set_xticklabels([]) # Prevent x coordinate values from covering text
+	axes[2].imshow(tyslice_fullimg.cpu().T)
+	axes[2].set_title(f"t,y values over time   t range: {tmin:0.4f}, {tmax:0.4f}")
+	axes[2].set_xticklabels([]) # Prevent x coordinate values from covering text
+	axes[3].imshow(wavefront_tyslice.cpu().T)
+	axes[3].set_title("t,y wavefront training signal (left, center, right")
 	return fig
 
 def waveform_tensors_plot(waveform_out_txy, waveform_gt_txy, coords):
