@@ -21,7 +21,7 @@ def normalize_tensor(tensor, clip_max=1):
     else:
         return ((tensor - tensor.mean()) / tensor.std()).clip(max=clip_max)
 
-def raw_wavefront_array_to_txy_tensor(wavefront_array, ydim_out, duration_s=30, time_axis_scale=0.5, SAMPLING_HZ=10,
+def raw_wavefront_array_to_normalized_txy(wavefront_array, ydim_out, duration_s=30, time_axis_scale=0.5, SAMPLING_HZ=10,
                                       clip_max=None):
 
     waveform_array_yxt = wavefront_array[:,:,:duration_s*SAMPLING_HZ]
@@ -41,38 +41,19 @@ def raw_wavefront_array_to_txy_tensor(wavefront_array, ydim_out, duration_s=30, 
     resized_tensor = F.interpolate(waveform_tensor[None,None,...], size=(tdim_out, xdim_out, ydim_out),
                                    mode='trilinear', align_corners=False)
 
-    return resized_tensor[0,0,...]
+    return resized_tensor[0,0,...].numpy()
 
 
-def get_wavefront_tensor_txy(ydim_out, slice_xrange=(30,90), output_dim=3, start_s=0, duration_s=30, time_axis_scale=0.5,
+def get_wavefront_tensor_txy(video_filepath, ydim_out, slice_xrange=(30,90), output_dim=3, start_s=0, duration_s=30, time_axis_scale=0.5,
                              target_graph_key="result"):
     """Supplying target_traph_key='clipped_image_tensor' will give an equivalently scaled version of the raw video instead """
 
-    waveform_slice_graph = pipelines.video_to_waveform_tensor('../tmp/shirahama_1590387334_SURF-93cm.ts', ydim_out=ydim_out,
+    waveform_slice_graph = pipelines.video_to_waveform_tensor(video_filepath, ydim_out=ydim_out,
                                                                 duration_s=duration_s, start_s=start_s,
                                                                 slice_xrange=slice_xrange, output_dim=output_dim,
                                                                 time_axis_scale=time_axis_scale)
     
-    return graphchain.get(waveform_slice_graph, target_graph_key)
-
-
-def get_wavefront_tensor_txy_old(ydim_out, slice_xrange=(30,90), output_dim=3, start_s=0, duration_s=30, time_axis_scale=0.5,
-                             target_graph_key="result"):
-    """Supplying target_traph_key='clipped_image_tensor' will give an equivalently scaled version of the raw video instead """
-
-    # Get a little more than the required duration, then clip to the appropriate length
-    # (pre-processing with delta-time result 2 less samples)
-    waveform_slice_graph = pipelines.video_to_waveform_slice('../tmp/shirahama_1590387334_SURF-93cm.ts',
-                                                                duration_s=duration_s+1, start_s=start_s,
-                                                                slice_xrange=slice_xrange, output_dim=output_dim)
-
-    waveform_array_yxt = graphchain.get(waveform_slice_graph, target_graph_key)
-    
-    # SAMPLING_HZ must match that defined within preprocessing pipeline steps (10hz)
-    output_wavefront_tensor = raw_wavefront_array_to_tensor(waveform_array_yxt, ydim_out=ydim_out, duration_s=duration_s, 
-                                                            time_axis_scale=time_axis_scale, SAMPLING_HZ=10)
-
-    return output_wavefront_tensor
+    return torch.from_numpy(graphchain.get(waveform_slice_graph, target_graph_key))
 
 
 # Cell
@@ -95,9 +76,10 @@ def get_mgrid(sidelen_tuple, tcoord_range=None):
 
 
 class WaveformVideoDataset(Dataset):
-    def __init__(self, ydim, xrange=(30,90), timerange=(0,61), time_chunk_duration_s=30, time_chunk_stride_s=15, time_axis_scale=0.5):
+    def __init__(self, video_filepath, ydim, xrange=(30,90), timerange=(0,61), time_chunk_duration_s=30, time_chunk_stride_s=15, time_axis_scale=0.5):
         super().__init__()
         start_s, end_s = timerange
+        self.video_filepath = video_filepath
         self.ydim = ydim
         self.xrange = xrange
         self.time_axis_scale = time_axis_scale
@@ -116,10 +98,10 @@ class WaveformVideoDataset(Dataset):
     def __getitem__(self, idx):
         if idx != self.cached_chunk_idx:
             item_start_s, item_end_s = self.video_chunk_timeranges[idx]
-            full_wf_tensor = get_wavefront_tensor_txy(self.ydim, slice_xrange=self.xrange, output_dim=3,
+            full_wf_tensor = get_wavefront_tensor_txy(self.video_filepath, self.ydim, slice_xrange=self.xrange, output_dim=3,
                                                 start_s=item_start_s, duration_s=(item_end_s - item_start_s),
                                                 time_axis_scale=self.time_axis_scale, target_graph_key="result")
-            full_vid_tensor = get_wavefront_tensor_txy(self.ydim, slice_xrange=self.xrange, output_dim=3,
+            full_vid_tensor = get_wavefront_tensor_txy(self.video_filepath, self.ydim, slice_xrange=self.xrange, output_dim=3,
                                                 start_s=item_start_s, duration_s=(item_end_s - item_start_s),
                                                 time_axis_scale=self.time_axis_scale, target_graph_key="scaled_video_tensor")
             # For now, abstract time coordinates will be in centered minutes (so a 2 minute video spans -1 to 1, and a 30 minute video spans -15 to 15)

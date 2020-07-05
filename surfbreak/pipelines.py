@@ -8,11 +8,11 @@ import pprint as pp
 
 SURFSPOT_CALIBRATION_VIDEOS = {
     "shirahama": [
-        '../data/shirahama_1590387334_SURF-93cm.ts',
-        '../data/shirahama_1590312313_SURF-101cm.ts',
-        '../data/shirahama_1592790996_SURF-129cm.ts',
-        '../data/shirahama_1590479277_SURF-59cm.ts',
-        '../data/shirahama_1590378088_SURF-93cm.ts'
+        '/home/erik/work/surfbreak/data/shirahama_1590387334_SURF-93cm.ts',
+        '/home/erik/work/surfbreak/data/shirahama_1590312313_SURF-101cm.ts',
+        '/home/erik/work/surfbreak/data/shirahama_1592790996_SURF-129cm.ts',
+        '/home/erik/work/surfbreak/data/shirahama_1590479277_SURF-59cm.ts',
+        '/home/erik/work/surfbreak/data/shirahama_1590378088_SURF-93cm.ts'
     ]
 }
 
@@ -74,10 +74,10 @@ def video_to_waveform_tensor(video_filename, ydim_out, slice_xrange=(30,90),
                                                   surfspot=surfspot, calibration_videos=calibration_videos)
     dask_graph['image_tensor'] = dask_graph['result']
     dask_graph['clipped_image_tensor'] = (supervision.vertical_waveform_slice,'image_tensor', slice_xrange, output_dim)
-    dask_graph['scaled_video_tensor'] = (datasets.raw_wavefront_array_to_txy_tensor, 'clipped_image_tensor', ydim_out, duration_s, 
+    dask_graph['scaled_video_tensor'] = (datasets.raw_wavefront_array_to_normalized_txy, 'clipped_image_tensor', ydim_out, duration_s, 
                                          time_axis_scale, 10) #SAMPLING_HZ
     dask_graph['waveform_slice'] = (supervision.generate_waveform_slice, 'image_tensor', slice_xrange, output_dim)
-    dask_graph['result'] = (datasets.raw_wavefront_array_to_txy_tensor, 'waveform_slice', ydim_out, duration_s, 
+    dask_graph['result'] = (datasets.raw_wavefront_array_to_normalized_txy, 'waveform_slice', ydim_out, duration_s, 
                              time_axis_scale, 10, 1.0) #SAMPLING_HZ, clip_max (clipping wavefronts to max 1.0 very important)
     return dask_graph
 
