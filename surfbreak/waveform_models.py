@@ -114,7 +114,6 @@ class LitSirenNet(pl.LightningModule):    # With no gradient or wave loss, oemeg
         eval_coords = model_input['coords_txyc'][:,::stp, xdim//4:-xdim//4:stp, ydim//4:-ydim//4:stp, :].reshape(1,-1,channels)
         wf_values_out, coords_out = self.model(eval_coords)
         loss = F.mse_loss(wf_values_out, ground_truth['wavefronts_txy'][:,::stp, xdim//4:-xdim//4:stp, ydim//4:-ydim//4:stp].reshape(1,-1,1))
-        #TODO: Fix this broken loss function - getting NANs
 
         coords_txyc = model_input['coords_txyc'][0]        # Removing the batch dimension
         wavefronts_txy = ground_truth['wavefronts_txy'][0] # Removing the batch dimension
