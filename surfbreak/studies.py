@@ -13,9 +13,9 @@ class MetricsCallback(pl.Callback):
     def on_validation_end(self, trainer, pl_module):
         self.metrics.append(trainer.callback_metrics)
 
-def run_waveform_hyperparam_search(objective, n_trials=100, timeout=1*60*60, model_dir='logs/opt_models', prune=False, n_startup_trials=3):
+def run_waveform_hyperparam_search(objective, n_trials=100, timeout=1*60*60, model_dir='logs/opt_models', prune=False, n_startup_trials=3, n_warmup_steps=5):
     if prune:
-        pruner = optuna.pruners.MedianPruner(n_startup_trials=n_startup_trials)
+        pruner = optuna.pruners.MedianPruner(n_startup_trials=n_startup_trials, n_warmup_steps=n_warmup_steps)
     else:
         pruner = optuna.pruners.NopPruner()
     study = optuna.create_study(direction="minimize", pruner=pruner)

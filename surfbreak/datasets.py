@@ -5,7 +5,7 @@ __all__ = ['normalize_tensor', 'get_wavefront_tensor_txy', 'get_mgrid', 'Wavefor
 
 # Cell
 from surfbreak import graphutils, supervision
-import pipelines
+from surfbreak import pipelines
 import graphchain
 import dask
 import matplotlib.pyplot as plt
@@ -32,7 +32,7 @@ def raw_wavefront_array_to_txy_tensor(wavefront_array, ydim_out, duration_s=30, 
 
     # Incredibly important to clip the large peak values in this raw waveform_array,
     # since it's mostly a binary indicator of where a wave-foam front was detected
-    waveform_tensor = torch.from_numpy(normalize_tensor(waveform_array_txy, clip_max=clip_max))
+    waveform_tensor = torch.from_numpy(normalize_tensor(waveform_array_txy.astype('float32'), clip_max=clip_max))
     _, xdim_in, ydim_in = waveform_tensor.shape
     xdim_out = int(ydim_out * (xdim_in / ydim_in))
     tdim_out = int(duration_s * SAMPLING_HZ * time_axis_scale)
@@ -48,7 +48,7 @@ def get_wavefront_tensor_txy(ydim_out, slice_xrange=(30,90), output_dim=3, start
                              target_graph_key="result"):
     """Supplying target_traph_key='clipped_image_tensor' will give an equivalently scaled version of the raw video instead """
 
-    waveform_slice_graph = pipelines.video_to_waveform_tensor('./tmp/shirahama_1590387334_SURF-93cm.ts', ydim_out=ydim_out,
+    waveform_slice_graph = pipelines.video_to_waveform_tensor('../tmp/shirahama_1590387334_SURF-93cm.ts', ydim_out=ydim_out,
                                                                 duration_s=duration_s, start_s=start_s,
                                                                 slice_xrange=slice_xrange, output_dim=output_dim,
                                                                 time_axis_scale=time_axis_scale)
@@ -62,7 +62,7 @@ def get_wavefront_tensor_txy_old(ydim_out, slice_xrange=(30,90), output_dim=3, s
 
     # Get a little more than the required duration, then clip to the appropriate length
     # (pre-processing with delta-time result 2 less samples)
-    waveform_slice_graph = pipelines.video_to_waveform_slice('./tmp/shirahama_1590387334_SURF-93cm.ts',
+    waveform_slice_graph = pipelines.video_to_waveform_slice('../tmp/shirahama_1590387334_SURF-93cm.ts',
                                                                 duration_s=duration_s+1, start_s=start_s,
                                                                 slice_xrange=slice_xrange, output_dim=output_dim)
 

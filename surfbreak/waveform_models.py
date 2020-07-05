@@ -18,7 +18,7 @@ from optuna.integration import PyTorchLightningPruningCallback
 
 from surfbreak.loss_functions import wave_pml 
 from surfbreak.datasets import WaveformVideoDataset, WaveformChunkDataset
-import explore_siren as siren
+from surfbreak import base_models, diff_operators
 
 from surfbreak.loss_functions import wave_pml_2
 
@@ -31,14 +31,14 @@ class LitSirenNet(pl.LightningModule):    # With no gradient or wave loss, oemeg
         super().__init__()
         self.save_hyperparameters('first_omega_0', 'hidden_omega_0', 'squared_slowness', 'wavefunc_loss_scale', 'xrange', 'timerange', 'grad_loss_scale','wavespeed_loss_scale',
                                   'hidden_features', 'hidden_layers', 'steps_per_vid_chunk', 'learning_rate' )
-        self.model = siren.Siren(in_features=3, 
+        self.model = base_models.Siren(in_features=3, 
                                  out_features=1, 
                                  hidden_features=hidden_features,
                                  hidden_layers=hidden_layers, outermost_linear=True,
                                  first_omega_0=first_omega_0,
                                  hidden_omega_0=hidden_omega_0)
         if wavespeed_loss_scale not in [None, 0, 0.]:
-            self.slowness_model = siren.Siren(in_features=2,     
+            self.slowness_model = base_models.Siren(in_features=2,     
                                             out_features=1, 
                                             hidden_features=64,
                                             hidden_layers=2, outermost_linear=True,
@@ -74,8 +74,8 @@ class LitSirenNet(pl.LightningModule):    # With no gradient or wave loss, oemeg
         if self.grad_loss_scale in [None, 0, 0.]:
             grad_loss = 0; laplace_loss = 0
         else:
-            grad_loss    =  siren.gradient(wf_values_out, coords_out).abs().mean()*self.grad_loss_scale
-            laplace_loss =  siren.laplace(wf_values_out, coords_out).abs().mean()*self.grad_loss_scale*0.1
+            grad_loss    =  diff_operators.gradient(wf_values_out, coords_out).abs().mean()*self.grad_loss_scale
+            laplace_loss =  diff_operators.laplace(wf_values_out, coords_out).abs().mean()*self.grad_loss_scale*0.1
             tensorboard_logs['train/grad_loss'] = grad_loss
             tensorboard_logs['train/laplace_loss'] = laplace_loss
 
@@ -110,9 +110,10 @@ class LitSirenNet(pl.LightningModule):    # With no gradient or wave loss, oemeg
         bdim, tdim, xdim, ydim, channels = model_input['coords_txyc'].shape
         # Evaluate only on the center 1/2 of coordinate values (where valid wave data is likely)
         stp = 3 # Step skipped between t,x,ycoordinates to evaluate (just to reduce memory usage)
-        eval_coords = model_input['coords_txyc'][::stp, xdim//4:-xdim//4:stp, ydim//4:-ydim//4:stp, :].reshape(1,-1,channels)
+        eval_coords = model_input['coords_txyc'][:,::stp, xdim//4:-xdim//4:stp, ydim//4:-ydim//4:stp, :].reshape(1,-1,channels)
         wf_values_out, coords_out = self.model(eval_coords)
-        loss = F.mse_loss(wf_values_out, ground_truth['wavefronts_txy'][::stp, xdim//4:-xdim//4:stp, ydim//4:-ydim//4:stp].reshape(1,-1,1))
+        loss = F.mse_loss(wf_values_out, ground_truth['wavefronts_txy'][:,::stp, xdim//4:-xdim//4:stp, ydim//4:-ydim//4:stp].reshape(1,-1,1))
+        #TODO: Fix this broken loss function - getting NANs
 
         coords_txyc = model_input['coords_txyc'][0]        # Removing the batch dimension
         wavefronts_txy = ground_truth['wavefronts_txy'][0] # Removing the batch dimension
@@ -125,10 +126,11 @@ class LitSirenNet(pl.LightningModule):    # With no gradient or wave loss, oemeg
             # Calcuate and plot the inferred squared_slowness field in x and y
             slow_vals_out, _ = self.slowness_model(coords_txyc[0,:,:,1:].reshape(-1,2)) # Skipping the first T channel
             slow_vals_array = slow_vals_out.reshape(coords_txyc[0,:,:,0].shape).cpu().detach().numpy()
-            fig2 = plt.figure()
+            img_aspect = coords_txyc.shape[2]/coords_txyc.shape[3]
+            fig2 = plt.figure(figsize=(10,5))
             img = plt.imshow(slow_vals_array.T)
             plt.title('Squared slowness estimate')
-            if coords_txyc.shape[2]/coords_txyc.shape[3] > 1:
+            if img_aspect > 1:
                 plt.colorbar(img, fraction=0.046, pad=0.15, orientation='horizontal')
             else:
                 plt.colorbar(img, fraction=0.046, pad=0.04, orientation='vertical')
@@ -166,8 +168,8 @@ class LitSirenNet(pl.LightningModule):    # With no gradient or wave loss, oemeg
         self.wf_train_video_dataset = WaveformVideoDataset(ydim=120, xrange=self.xrange, timerange=self.timerange, time_chunk_duration_s=self.chunk_duration, 
                                                      time_chunk_stride_s=self.chunk_stride, time_axis_scale=0.5)
         n_vid_chunks = len(self.wf_train_video_dataset)
-        self.wf_train_chunk_dataset = WaveformChunkDataset(self.wf_train_video_dataset, xy_bucket_sidelen=20, samples_per_xy_bucket=5, 
-                                                     time_sample_interval=5, steps_per_video_chunk=self.steps_per_vid_chunk,
+        self.wf_train_chunk_dataset = WaveformChunkDataset(self.wf_train_video_dataset, xy_bucket_sidelen=20, samples_per_xy_bucket=15, 
+                                                     time_sample_interval=15, steps_per_video_chunk=self.steps_per_vid_chunk,
                                                      sample_fraction=1.0/n_vid_chunks)
         # Validate on three chunks spread along the full time duration.
         # Having the same center timepoint will ensure the centered time representations are aligned between training and validation

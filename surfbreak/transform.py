@@ -7,7 +7,7 @@ __all__ = ['normalized', 'shift_img', 'trim_image', 'fit_line', 'rotate_bound', 
 
 # Cell
 from surfbreak import detection, graphutils, load_videos
-import pipelines
+from surfbreak import pipelines
 import dask
 import graphchain
 import cv2
