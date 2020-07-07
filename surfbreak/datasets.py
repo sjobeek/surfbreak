@@ -236,3 +236,83 @@ class WaveformChunkDataset(Dataset):
         }
 
         return model_input, ground_truth
+
+
+import pickle
+import os
+
+def video_txy_to_wavecnn_array_cxy(video_txy, t):
+    # Create an image with 2 channels - intensity, and the one-step intensity delta
+    assert t < video_txy.shape[0]-1, "Cannot infer last frame (or beyond)"
+    input_img_array_cxy = torch.cat((video_txy[t][None,...], 
+                                     video_txy[t+1][None,...] - video_txy[t][None,...]), dim=0)
+    return input_img_array_cxy
+
+
+def cache_video_dataset_as_inferred_xy_images(video_dataset, model, tmpdir='./tmp/dataset_cache'):
+    """Returns a list of filename tuples which are written as pickle files to the folder tmpdir"""
+    if not os.path.exists(tmpdir):
+            os.makedirs(tmpdir)
+    cached_image_pair_filenames = []
+    for chunk_idx, (m_input, gt) in enumerate(video_dataset):
+        n_timesteps_this_chunk = m_input['coords_txyc'].shape[0]
+        assert n_timesteps_this_chunk == gt['video_txy'].shape[0]
+        for t_idx in range(n_timesteps_this_chunk - 1): # Due to time delta, one less length
+            # Infer the target x,y image at time t using the pre-trained model (as training target)
+            waveform_array_xy, _ = model(m_input['coords_txyc'][t_idx])
+            waveform_array_fname = f"c{chunk_idx}_t{t_idx}_waveform_xyc"
+            with open(os.path.join(tmpdir, waveform_array_fname), 'wb') as f:
+                pickle.dump(waveform_array_xy.detach().numpy()[...,0] , f) # [...,0] to drop trailing empty dimension
+            # Also save the corresponding video image (as training input)
+            img_array_fname =   f"c{chunk_idx}_t{t_idx}_video_xy"
+            # Create an image with 2 channels - intensity, and the one-step intensity delta 
+            input_img_array_cxy = video_txy_to_wavecnn_array_cxy(gt['video_txy'], t_idx)
+            with open(os.path.join(tmpdir, img_array_fname), 'wb') as f:
+                pickle.dump(input_img_array_cxy.numpy(), f)
+            # Order is (train input, train target)
+            cached_image_pair_filenames.append((img_array_fname, waveform_array_fname))
+    return cached_image_pair_filenames
+
+
+from surfbreak.train_utils import slugify
+
+class InferredWaveformDataset(Dataset):
+    def __init__(self, video_filepath, trained_waveform_model, ydim, xrange=(30,90), timerange=(0,61), time_chunk_duration_s=30, time_chunk_stride_s=15, time_axis_scale=0.5,
+                 tmpdir='./tmp/dataset_cache'):
+        super().__init__()
+        start_s, end_s = timerange
+        self.video_filepath = video_filepath
+        self.ydim = ydim
+        self.xrange = xrange
+        self.time_axis_scale = time_axis_scale
+        self.time_chunk_duration_s = time_chunk_duration_s
+        self.time_chunk_stride_s = time_chunk_stride_s
+        self.t_coords_per_second = 10 * time_axis_scale
+        self.tmpdir=tmpdir
+        self.waveform_model = trained_waveform_model
+        
+        self.wf_train_video_dataset = WaveformVideoDataset(video_filepath, ydim=ydim, xrange=xrange, timerange=timerange, time_chunk_duration_s=time_chunk_duration_s, 
+                                                           time_chunk_stride_s=time_chunk_stride_s, time_axis_scale=time_axis_scale)
+        
+        self.fname_pairs = cache_video_dataset_as_inferred_xy_images(self.wf_train_video_dataset, self.waveform_model, tmpdir=self.tmpdir)        
+        
+    def __len__(self):
+        return len(self.fname_pairs)
+
+    def __getitem__(self, idx):
+        vid_fname, wf_fname = self.fname_pairs[idx]
+        with open(os.path.join(self.tmpdir, vid_fname), 'rb') as f:
+            model_input_cxy = torch.from_numpy(pickle.load(f)) # Input has a channel dimension already
+        with open(os.path.join(self.tmpdir, wf_fname), 'rb') as f:
+            ground_truth_cxy = torch.from_numpy(pickle.load(f))[None,...] # Add empty channel dimension for now
+        assert model_input_cxy.shape[1:] == ground_truth_cxy.shape[1:]
+ 
+        return (trim_img_to_nearest_multiple(model_input_cxy,  divisor=4), # Must be divisible by 4 - just crop for now.
+                trim_img_to_nearest_multiple(ground_truth_cxy, divisor=4))  # video_image_xy, inferred_waveform_xy
+    
+def trim_img_to_nearest_multiple(tensor, divisor=4):
+    max_xdim = tensor.shape[-2] - tensor.shape[-2]%divisor  # Must be divisible by 4 - just crop for now. 
+    max_ydim = tensor.shape[-1] - tensor.shape[-1]%divisor  # Must be divisible by 4 - just crop for now. 
+    return tensor[..., :max_xdim,:max_ydim]
+
+

@@ -17,7 +17,7 @@ import optuna
 from optuna.integration import PyTorchLightningPruningCallback
 
 from surfbreak.loss_functions import wave_pml 
-from surfbreak.datasets import WaveformVideoDataset, WaveformChunkDataset
+from surfbreak.datasets import WaveformVideoDataset, WaveformChunkDataset, InferredWaveformDataset
 from surfbreak import base_models, diff_operators
 
 from surfbreak.loss_functions import wave_pml_2
@@ -183,3 +183,64 @@ class LitSirenNet(pl.LightningModule):    # With no gradient or wave loss, oemeg
 
     def val_dataloader(self):
         return torch.utils.data.DataLoader(self.wf_valid_video_dataset, batch_size=1, shuffle=False, num_workers=4)
+
+
+class LitWaveCNN(pl.LightningModule): 
+    def __init__(self, video_filepath, wf_model_checkpoint, learning_rate, xrange=(10,130), timerange=(0,31), chunk_duration=30, chunk_stride=15,
+                 n_input_channels=2):
+        """steps_per_vid_chunk defines the single-tensor resampled dataset length"""
+        super().__init__()
+        self.save_hyperparameters('video_filepath', 'learning_rate','xrange', 'timerange', 'chunk_duration')
+        self.model = base_models.WaveUnet(n_class=1, n_input_channels=n_input_channels)
+       
+        self.video_filepath = video_filepath
+        self.learning_rate=learning_rate
+        self.timerange=timerange
+        self.chunk_duration=chunk_duration
+        self.chunk_stride=chunk_stride
+        self.xrange = xrange
+        self.n_input_channels=n_input_channels
+        self.wf_model_checkpoint = wf_model_checkpoint
+        
+        self.example_input_array = torch.ones(1,n_input_channels,256,256)
+
+    def forward(self, data):
+        return self.model(data)
+
+    def training_step(self, batch, batch_nb):
+        model_input, ground_truth = batch
+        wf_values_out = self.model(model_input)
+        mse_loss = F.mse_loss(wf_values_out, ground_truth)
+        tensorboard_logs = {'train/mse_loss':mse_loss}
+        return {'loss': mse_loss, 'log': tensorboard_logs}
+
+    def validation_step(self, batch, batch_nb):
+        model_input, ground_truth = batch
+        model_output = self.model(model_input)
+        loss = F.mse_loss(model_output, ground_truth)
+        return {'val_loss':loss}
+
+
+    def validation_epoch_end(self, outputs):
+        avg_loss = sum(x["val_loss"] for x in outputs) / len(outputs)
+        tensorboard_logs = {'val/avg_loss': avg_loss}
+        return {"val_loss": avg_loss, "log":tensorboard_logs}
+
+    def configure_optimizers(self):
+        return Adam(self.model.parameters(), lr=self.learning_rate)
+    
+    def setup(self, stage):
+        # Train on a dataset consisting of 30-second chunks offset by 30 seconds
+        self.wf_train_video_dataset = WaveformVideoDataset(self.video_filepath, ydim=120, xrange=self.xrange, timerange=self.timerange, 
+                                                           time_chunk_duration_s=self.chunk_duration, 
+                                                           time_chunk_stride_s=self.chunk_stride, time_axis_scale=0.5)
+        trained_waveform_model = LitSirenNet.load_from_checkpoint(self.wf_model_checkpoint, video_filepath=self.video_filepath)
+        self.inferred_waveform_dataset = InferredWaveformDataset(self.video_filepath, trained_waveform_model, ydim=120, xrange=self.xrange, timerange=self.timerange, 
+                                                           time_chunk_duration_s=self.chunk_duration, 
+                                                           time_chunk_stride_s=self.chunk_stride, time_axis_scale=0.5)
+
+    def train_dataloader(self):
+        return torch.utils.data.DataLoader(self.inferred_waveform_dataset, batch_size=20, shuffle=True, num_workers=4)
+
+    def val_dataloader(self):
+        return torch.utils.data.DataLoader(self.inferred_waveform_dataset, batch_size=1, shuffle=False, num_workers=4)
