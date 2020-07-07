@@ -26,7 +26,8 @@ from surfbreak.loss_functions import wave_pml_2
 class LitSirenNet(pl.LightningModule):    # With no gradient or wave loss, oemega values of (1, 5) work well (best at epochs 3~5)  
     def __init__(self, video_filepath, hidden_features=256, hidden_layers=3, first_omega_0=1.0, hidden_omega_0=5.0, squared_slowness=3.0,
                  steps_per_vid_chunk=150, learning_rate=1e-4, grad_loss_scale=1e-4, wavefunc_loss_scale=1e-7, 
-                 wavespeed_loss_scale=1e-2, xrange=(10,130), timerange=(0,31), chunk_duration=30, chunk_stride=15):
+                 wavespeed_loss_scale=1e-2, xrange=(10,130), timerange=(0,31), chunk_duration=30, chunk_stride=15,
+                 vid_dataset=None, chunk_dataset=None):
         """steps_per_vid_chunk defines the single-tensor resampled dataset length"""
         super().__init__()
         self.save_hyperparameters('first_omega_0', 'hidden_omega_0', 'squared_slowness', 'wavefunc_loss_scale', 'xrange', 'timerange', 'grad_loss_scale','wavespeed_loss_scale',
@@ -57,6 +58,8 @@ class LitSirenNet(pl.LightningModule):    # With no gradient or wave loss, oemeg
         self.chunk_duration=chunk_duration
         self.chunk_stride=chunk_stride
         self.xrange = xrange
+        self.wf_train_video_dataset = vid_dataset
+        self.wf_train_chunk_dataset = chunk_dataset
         
         self.example_input_array = torch.ones(1,1337,3)
 
@@ -165,12 +168,14 @@ class LitSirenNet(pl.LightningModule):    # With no gradient or wave loss, oemeg
     
     def setup(self, stage):
         # Train on a dataset consisting of 30-second chunks offset by 30 seconds
-        self.wf_train_video_dataset = WaveformVideoDataset(self.video_filepath, ydim=120, xrange=self.xrange, timerange=self.timerange, time_chunk_duration_s=self.chunk_duration, 
-                                                     time_chunk_stride_s=self.chunk_stride, time_axis_scale=0.5)
+        if self.wf_train_video_dataset is None:
+            self.wf_train_video_dataset = WaveformVideoDataset(self.video_filepath, ydim=120, xrange=self.xrange, timerange=self.timerange, time_chunk_duration_s=self.chunk_duration, 
+                                                               time_chunk_stride_s=self.chunk_stride, time_axis_scale=0.5)
         n_vid_chunks = len(self.wf_train_video_dataset)
-        self.wf_train_chunk_dataset = WaveformChunkDataset(self.wf_train_video_dataset, xy_bucket_sidelen=20, samples_per_xy_bucket=15, 
-                                                     time_sample_interval=15, steps_per_video_chunk=self.steps_per_vid_chunk,
-                                                     sample_fraction=1.0/n_vid_chunks)
+        if self.wf_train_chunk_dataset is None:
+            self.wf_train_chunk_dataset = WaveformChunkDataset(self.wf_train_video_dataset, xy_bucket_sidelen=20, samples_per_xy_bucket=15, 
+                                                               time_sample_interval=15, steps_per_video_chunk=self.steps_per_vid_chunk,
+                                                               sample_fraction=1.0/n_vid_chunks)
         # Validate on three chunks spread along the full time duration.
         # Having the same center timepoint will ensure the centered time representations are aligned between training and validation
         self.wf_valid_video_dataset = WaveformVideoDataset(self.video_filepath,ydim=120, xrange=self.xrange, timerange=self.timerange, time_chunk_duration_s=self.chunk_duration, 
@@ -186,7 +191,7 @@ class LitSirenNet(pl.LightningModule):    # With no gradient or wave loss, oemeg
 
 
 class LitWaveCNN(pl.LightningModule): 
-    def __init__(self, video_filepath, wf_model_checkpoint, learning_rate, xrange=(10,130), timerange=(0,31), chunk_duration=30, chunk_stride=15,
+    def __init__(self, video_filepath, wf_model, learning_rate, xrange=(10,130), timerange=(0,31), chunk_duration=30, chunk_stride=15,
                  n_input_channels=2):
         """steps_per_vid_chunk defines the single-tensor resampled dataset length"""
         super().__init__()
@@ -200,7 +205,7 @@ class LitWaveCNN(pl.LightningModule):
         self.chunk_stride=chunk_stride
         self.xrange = xrange
         self.n_input_channels=n_input_channels
-        self.wf_model_checkpoint = wf_model_checkpoint
+        self.wf_model = wf_model
         
         self.example_input_array = torch.ones(1,n_input_channels,256,256)
 
@@ -234,8 +239,9 @@ class LitWaveCNN(pl.LightningModule):
         self.wf_train_video_dataset = WaveformVideoDataset(self.video_filepath, ydim=120, xrange=self.xrange, timerange=self.timerange, 
                                                            time_chunk_duration_s=self.chunk_duration, 
                                                            time_chunk_stride_s=self.chunk_stride, time_axis_scale=0.5)
-        trained_waveform_model = LitSirenNet.load_from_checkpoint(self.wf_model_checkpoint, video_filepath=self.video_filepath)
-        self.inferred_waveform_dataset = InferredWaveformDataset(self.video_filepath, trained_waveform_model, ydim=120, xrange=self.xrange, timerange=self.timerange, 
+        if isinstance(self.wf_model, str): # If a checkpoint filepath was passed, load it
+            self.wf_model = LitSirenNet.load_from_checkpoint(self.wf_model, video_filepath=self.video_filepath)
+        self.inferred_waveform_dataset = InferredWaveformDataset(self.video_filepath, self.wf_model, ydim=120, xrange=self.xrange, timerange=self.timerange, 
                                                            time_chunk_duration_s=self.chunk_duration, 
                                                            time_chunk_stride_s=self.chunk_stride, time_axis_scale=0.5)
 
