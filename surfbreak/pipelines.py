@@ -81,6 +81,22 @@ def video_to_waveform_tensor(video_filename, ydim_out, slice_xrange=(30,90),
                              time_axis_scale, 10, 1.0) #SAMPLING_HZ, clip_max (clipping wavefronts to max 1.0 very important)
     return dask_graph
 
+def video_to_trimmed_tensor(video_filename, ydim_out=128,
+                             start_s=0, duration_s=30, time_axis_scale=0.5, sampling_hz=10,
+                             output_dim=3, calibration_videos=None, surfspot=None):
+    
+    # Get a little more than the required duration for the raw video, then clip to the appropriate length
+    # (pre-processing with delta-time result 2 less samples)
+    """ Image tensors are 10hz by default (1/6th of the frames from a of 60Hz video)"""
+    dask_graph = video_to_calibrated_image_tensor(video_filename, duration_s, start_s,
+                                                  surfspot=surfspot, calibration_videos=calibration_videos)
+    dask_graph['image_tensor'] = dask_graph['result']
+    dask_graph['normalized_tensor'] = (datasets.raw_wavefront_array_to_normalized_txy, 'image_tensor', ydim_out, duration_s, 
+                                         time_axis_scale, sampling_hz) #SAMPLING_HZ
+                                    # Trim trailing 2 dimensions so they evenly divide into 4 (for CNN model)
+    dask_graph['result'] = (datasets.trim_img_to_nearest_multiple, 'normalized_tensor')
+    return dask_graph
+
 if __name__ == "__main__":
     video = '../tmp/shirahama_1590387334_SURF-93cm.ts'
 

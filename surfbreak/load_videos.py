@@ -100,7 +100,7 @@ def decode_frame_sequence(stream_filepath, duration_s=10, start_s=0, RGB=False, 
     wait_ms = int(1000/video_fps)
     print(f'Decoding {stream_filepath}  Duration: {file_duration_s/60:0.1f}m ({(file_duration_s):0.2f}s)  FPS: {video_fps}'
           f'  Emitting 1/{one_image_per_n_frames} of frames ')
-    n_frames = duration_s*int(video_fps)
+    n_frames = int(duration_s*int(video_fps))
     start_frame_index = int(start_s*int(video_fps))
     cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame_index);
     frames = []

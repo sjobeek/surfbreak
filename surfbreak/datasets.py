@@ -24,8 +24,8 @@ def normalize_tensor(tensor, clip_max=1):
 def raw_wavefront_array_to_normalized_txy(wavefront_array, ydim_out, duration_s=30, time_axis_scale=0.5, SAMPLING_HZ=10,
                                       clip_max=None):
 
-    waveform_array_yxt = wavefront_array[:,:,:duration_s*SAMPLING_HZ]
-    assert waveform_array_yxt.shape[2] == duration_s*SAMPLING_HZ
+    waveform_array_yxt = wavefront_array[:,:,:int(duration_s*SAMPLING_HZ)]
+    assert waveform_array_yxt.shape[2] == int(duration_s*SAMPLING_HZ)
 
     # Reshape to the standard channel axis order for learning (T, X, Y)
     waveform_array_txy = np.transpose(waveform_array_yxt, (2,1,0))

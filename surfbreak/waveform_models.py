@@ -191,7 +191,7 @@ class LitSirenNet(pl.LightningModule):    # With no gradient or wave loss, oemeg
 
 
 class LitWaveCNN(pl.LightningModule): 
-    def __init__(self, video_filepath, wf_model, learning_rate, xrange=(10,130), timerange=(0,31), chunk_duration=30, chunk_stride=15,
+    def __init__(self, video_filepath, learning_rate=1e-4, wf_model_checkpoint=None, xrange=(10,130), timerange=(0,31), chunk_duration=30, chunk_stride=15,
                  n_input_channels=2):
         """steps_per_vid_chunk defines the single-tensor resampled dataset length"""
         super().__init__()
@@ -205,7 +205,7 @@ class LitWaveCNN(pl.LightningModule):
         self.chunk_stride=chunk_stride
         self.xrange = xrange
         self.n_input_channels=n_input_channels
-        self.wf_model = wf_model
+        self.wf_model_checkpoint = wf_model_checkpoint
         
         self.example_input_array = torch.ones(1,n_input_channels,256,256)
 
@@ -239,9 +239,9 @@ class LitWaveCNN(pl.LightningModule):
         self.wf_train_video_dataset = WaveformVideoDataset(self.video_filepath, ydim=120, xrange=self.xrange, timerange=self.timerange, 
                                                            time_chunk_duration_s=self.chunk_duration, 
                                                            time_chunk_stride_s=self.chunk_stride, time_axis_scale=0.5)
-        if isinstance(self.wf_model, str): # If a checkpoint filepath was passed, load it
-            self.wf_model = LitSirenNet.load_from_checkpoint(self.wf_model, video_filepath=self.video_filepath)
-        self.inferred_waveform_dataset = InferredWaveformDataset(self.video_filepath, self.wf_model, ydim=120, xrange=self.xrange, timerange=self.timerange, 
+        assert self.wf_model_checkpoint is not None, "Cannot train this detector without a pre-trained waveform model (wf_model_checkpoint=None)"
+        wf_model = LitSirenNet.load_from_checkpoint(self.wf_model_checkpoint, video_filepath=self.video_filepath)
+        self.inferred_waveform_dataset = InferredWaveformDataset(self.video_filepath, wf_model, ydim=120, xrange=self.xrange, timerange=self.timerange, 
                                                            time_chunk_duration_s=self.chunk_duration, 
                                                            time_chunk_stride_s=self.chunk_stride, time_axis_scale=0.5)
 
