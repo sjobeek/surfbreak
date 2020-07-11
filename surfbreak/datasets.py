@@ -315,4 +315,100 @@ def trim_img_to_nearest_multiple(tensor, divisor=4):
     max_ydim = tensor.shape[-1] - tensor.shape[-1]%divisor  # Must be divisible by 4 - just crop for now. 
     return tensor[..., :max_xdim,:max_ydim]
 
+def detect_wavefronts(wf_cnn_checkpoint, video_tensor):
+    wavecnn_model = LitWaveCNN.load_from_checkpoint(wf_cnn_checkpoint)
+    # Append the second channel with time-delta intensity
+    input_img_array_tcxy = np.concatenate((video_tensor[:-1][None,...], 
+                                          video_tensor[1:][None,...] - video_tensor[:-1][None,...]), axis=0).transpose(1,0,2,3)
+    return wavecnn_model(torch.from_numpy(input_img_array_tcxy))
 
+def get_trimmed_tensor(wf_labeling_training_video, start_s=5, duration_s=1.2, time_axis_scale=0.5):
+    from surfbreak.pipelines import video_to_trimmed_tensor
+    wf_graph = video_to_trimmed_tensor(wf_labeling_training_video, start_s=start_s, duration_s=duration_s, time_axis_scale=time_axis_scale)
+    return graphchain.get(wf_graph, 'result')
+
+from surfbreak.supervision import wavefront_diff_tensor
+
+class CNNChunkDataset(Dataset):
+    def __init__(self, video_filepath, wavecnn_ckpt=None, ydim=150, timerange=(0,61), time_chunk_duration_s=1, time_chunk_stride_s=1, time_axis_scale=0.5):
+        super().__init__()
+        from surfbreak.waveform_models import LitWaveCNN
+        self.video_filepath = video_filepath
+        self.wavecnn_ckpt = wavecnn_ckpt
+        self.ydim = ydim
+        self.time_axis_scale = time_axis_scale
+        self.time_chunk_duration_s = time_chunk_duration_s
+        self.time_chunk_stride_s = time_chunk_stride_s
+        self.t_coords_per_second = 10 * time_axis_scale
+        self.average_wavefront_xy = 0
+
+        start_s, end_s = timerange
+        self.video_chunk_timeranges = np.array(list((start, start+time_chunk_duration_s) for start in
+                                                    range(start_s, end_s + 1 - time_chunk_duration_s, time_chunk_stride_s)))
+        item_start_s, item_end_s = self.video_chunk_timeranges[0]
+        self.first_raw_vid_tensor = get_trimmed_tensor(self.video_filepath, start_s=item_start_s, duration_s=(item_end_s - item_start_s),
+                                                       time_axis_scale=self.time_axis_scale)
+        
+        if self.wavecnn_ckpt is None:
+            self.wavecnn_model = None
+        else:
+            self.wavecnn_model = LitWaveCNN.load_from_checkpoint(wavecnn_ckpt, wf_model_checkpoint=None).cuda()
+            
+        firstout, firstgt = self[0]
+        acc_wf_img = np.zeros_like(firstgt['wavefronts_txy'].mean(axis=0))
+        for model_in, model_gt in self:
+            acc_wf_img += model_gt['wavefronts_txy'].mean(axis=0)
+        avg_wf_img = acc_wf_img / len(self)
+        self.average_wavefront_xy = avg_wf_img
+        
+    def __len__(self):
+        return len(self.video_chunk_timeranges)
+
+    def __getitem__(self, idx):
+        item_start_s, item_end_s = self.video_chunk_timeranges[idx]
+        
+        if self.wavecnn_model is None: # Use a simple time-delta of intensities if no CNN-based wave detector given
+            vid_tensor_tplus3 = get_trimmed_tensor(self.video_filepath, start_s=item_start_s, 
+                                               duration_s=(item_end_s - item_start_s + 3/self.t_coords_per_second), # Add one extra timestep here
+                                               time_axis_scale=self.time_axis_scale)
+            vid_tensor_txy = vid_tensor_tplus3[:-3] # Remove the extra timestep which was needed for the wavecnn input calculation
+
+            wavecnn_label = normalize_tensor(wavefront_diff_tensor(vid_tensor_tplus3.transpose(1,2,0)).transpose(2,0,1), clip_max=1)
+        
+        else: # Do inference using a CNN
+            vid_tensor_tplus1 = get_trimmed_tensor(self.video_filepath, start_s=item_start_s, 
+                                               duration_s=(item_end_s - item_start_s + 1/self.t_coords_per_second), # Add one extra timestep here
+                                               time_axis_scale=self.time_axis_scale)
+            vid_tensor_txy = vid_tensor_tplus1[:-1] # Remove the extra timestep which was needed for the wavecnn input calculation
+                                               
+            wavecnn_input_tcxy = np.concatenate((vid_tensor_tplus1[:-1][None,...],  # Get a 2-channel representation (intensity, timedelta)
+                                        vid_tensor_tplus1[1:][None,...] - vid_tensor_tplus1[:-1][None,...]), axis=0).transpose(1,0,2,3)            
+            assert wavecnn_input_tcxy.shape[0] == vid_tensor_txy.shape[0] # Ensure length of time dimension is identical
+            # Process the input video tensors one timestep at a time on the GPU, to avoid using too much memory
+            frames_out = []
+            for t in range(wavecnn_input_tcxy.shape[0]):
+                this_wavecnn_input = torch.from_numpy(wavecnn_input_tcxy[t]).cuda()[None,...]
+                frames_out.append(self.wavecnn_model(this_wavecnn_input)[:,0].detach().cpu().numpy()) # Remove the empty second channel dimension
+            wavecnn_label = np.concatenate(frames_out, axis=0)
+
+        # For now, abstract time coordinates will be in centered minutes (so a 2 minute video spans -1 to 1, and a 30 minute video spans -15 to 15)
+        full_duration_s = self.video_chunk_timeranges.max() - self.video_chunk_timeranges.min()
+        full_tcoord_range = -((full_duration_s/60) / 2), ((full_duration_s/60) / 2)
+
+        this_chunk_tcoord_range = [self.video_chunk_timeranges[idx][0]/60 - full_tcoord_range[1],
+                                   self.video_chunk_timeranges[idx][1]/60 - full_tcoord_range[1]]
+
+        all_coords = get_mgrid(vid_tensor_txy.shape, tcoord_range=this_chunk_tcoord_range)
+
+        model_input = {
+            'coords_txyc':all_coords.reshape(*vid_tensor_txy.shape,3)
+        }
+
+        assert vid_tensor_txy.shape == wavecnn_label.shape
+        ground_truth = {
+            "video_txy": vid_tensor_txy,
+            "wavefronts_txy": wavecnn_label - self.average_wavefront_xy,
+            "timerange": (item_start_s, item_end_s),
+        }
+
+        return model_input, ground_truth

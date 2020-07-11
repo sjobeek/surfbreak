@@ -5,7 +5,6 @@ import graphchain
 import numpy
 import pprint as pp
 
-
 SURFSPOT_CALIBRATION_VIDEOS = {
     "shirahama": [
         '/home/erik/work/surfbreak/data/shirahama_1590387334_SURF-93cm.ts',
@@ -96,6 +95,15 @@ def video_to_trimmed_tensor(video_filename, ydim_out=128,
                                     # Trim trailing 2 dimensions so they evenly divide into 4 (for CNN model)
     dask_graph['result'] = (datasets.trim_img_to_nearest_multiple, 'normalized_tensor')
     return dask_graph
+
+def wavedetection_cnn_training(training_video):
+    from surfbreak.model_training import train_basic_waveform_model, train_wavefront_detection_cnn
+    dask_graph = {
+        'rough_waveform_model_ckpt': (train_basic_waveform_model, training_video, 20),
+        'waveform_cnn_ckpt': (train_wavefront_detection_cnn, training_video, 'rough_waveform_model_ckpt', 20)
+    }
+    return dask_graph
+
 
 if __name__ == "__main__":
     video = '../tmp/shirahama_1590387334_SURF-93cm.ts'
