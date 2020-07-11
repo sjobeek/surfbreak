@@ -340,7 +340,8 @@ class CNNChunkDataset(Dataset):
         self.time_chunk_duration_s = time_chunk_duration_s
         self.time_chunk_stride_s = time_chunk_stride_s
         self.t_coords_per_second = 10 * time_axis_scale
-        self.average_wavefront_xy = 0
+        self.average_wavefront_xy = np.zeros(1)
+        self.std_wavefront_xy = np.zeros(1)
 
         start_s, end_s = timerange
         self.video_chunk_timeranges = np.array(list((start, start+time_chunk_duration_s) for start in
@@ -353,13 +354,16 @@ class CNNChunkDataset(Dataset):
             self.wavecnn_model = None
         else:
             self.wavecnn_model = LitWaveCNN.load_from_checkpoint(wavecnn_ckpt, wf_model_checkpoint=None).cuda()
-            
+        
+        # Accumulate statistics for the wavefront images (mean and standard deviation)
         firstout, firstgt = self[0]
-        acc_wf_img = np.zeros_like(firstgt['wavefronts_txy'].mean(axis=0))
+        acc_avg_wf_img = np.zeros_like(firstgt['wavefronts_txy'].mean(axis=0))
+        acc_std_wf_img = np.zeros_like(firstgt['wavefronts_txy'])
         for model_in, model_gt in self:
-            acc_wf_img += model_gt['wavefronts_txy'].mean(axis=0)
-        avg_wf_img = acc_wf_img / len(self)
-        self.average_wavefront_xy = avg_wf_img
+            acc_avg_wf_img += model_gt['wavefronts_txy'].mean(axis=0)
+            acc_std_wf_img = np.concatenate((acc_std_wf_img, model_gt['wavefronts_txy']), axis=0)
+        self.average_wavefront_xy = acc_avg_wf_img / len(self)
+        self.std_wavefront_xy = acc_std_wf_img.std(axis=0)
         
     def __len__(self):
         return len(self.video_chunk_timeranges)
@@ -409,6 +413,7 @@ class CNNChunkDataset(Dataset):
             "video_txy": vid_tensor_txy,
             "wavefronts_txy": wavecnn_label - self.average_wavefront_xy,
             "timerange": (item_start_s, item_end_s),
+            "wavefront_loss_mask": self.std_wavefront_xy > self.std_wavefront_xy.mean()
         }
 
         return model_input, ground_truth
