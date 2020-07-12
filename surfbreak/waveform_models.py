@@ -17,7 +17,8 @@ import optuna
 from optuna.integration import PyTorchLightningPruningCallback
 
 from surfbreak.loss_functions import wave_pml 
-from surfbreak.datasets import WaveformVideoDataset, WaveformChunkDataset, InferredWaveformDataset
+from surfbreak.datasets import (WaveformVideoDataset, WaveformChunkDataset, InferredWaveformDataset, 
+                                WavefrontSupervisionDataset, MaskedWavefrontDataset)
 from surfbreak import base_models, diff_operators
 
 from surfbreak.loss_functions import wave_pml_2
@@ -250,3 +251,121 @@ class LitWaveCNN(pl.LightningModule):
 
     def val_dataloader(self):
         return torch.utils.data.DataLoader(self.inferred_waveform_dataset, batch_size=1, shuffle=False, num_workers=4)
+
+
+class WaveformNet(pl.LightningModule):    # With no gradient or wave loss, oemega values of (1, 5) work well (best at epochs 3~5)  
+    def __init__(self, hidden_features=256, hidden_layers=3, first_omega_0=1.0, hidden_omega_0=5.0, squared_slowness=3.0,
+                 learning_rate=1e-4, wavefunc_loss_scale=1e-7, wavespeed_loss_scale=1e-2, 
+                 video_filepath=None, train_dataset=None, valid_dataset=None, batch_size=20):
+        """Learns a low-dimensional function which maps t,x,y video coordinates to waveform magnitude. 
+           The model applies a physics-based waveform cost function to regularize the signal, using a 2nd-order PDE (see the SIREN paper).
+           The model also jointly inferrs the static wave propogation velocity field used the waveform loss (in units of squared slowness).             
+           Setting wavespeed_loss_scale to None will result in assuming the uniform, static wave velocity given in squared_slowness
+           """
+        super().__init__()
+        if video_filepath is None:
+            assert train_dataset is not None and valid_dataset is not None, "Either a video_filepath or datasets must be provided."
+        self.save_hyperparameters('first_omega_0', 'hidden_omega_0', 'squared_slowness', 'wavefunc_loss_scale', 'wavespeed_loss_scale',
+                                  'hidden_features', 'hidden_layers', 'learning_rate' )
+        self.model = base_models.Siren(in_features=3, 
+                                 out_features=1, 
+                                 hidden_features=hidden_features,
+                                 hidden_layers=hidden_layers, outermost_linear=True,
+                                 first_omega_0=first_omega_0,
+                                 hidden_omega_0=hidden_omega_0)
+        if wavespeed_loss_scale not in [None, 0, 0.]:
+            self.slowness_model = base_models.Siren(in_features=2,     
+                                            out_features=1, 
+                                            hidden_features=64,
+                                            hidden_layers=2, outermost_linear=True,
+                                            first_omega_0=3.5, #1.5
+                                            hidden_omega_0=15., #10.
+                                            softmax_output=True) # Prevent negative or zero squared slowness values from ruining the physics
+
+        self.learning_rate=learning_rate
+        self.squared_slowness = squared_slowness
+        self.wavefunc_loss_scale=wavefunc_loss_scale
+        self.wavespeed_loss_scale=wavespeed_loss_scale
+        self.wf_train_dataset = train_dataset
+        self.wf_valid_dataset = valid_dataset
+        self.video_filepath = video_filepath
+        self.batch_size = batch_size
+
+        self.example_input_array = torch.ones(1,1337,3)
+
+    def forward(self, data):
+        return self.model(data)
+
+    def training_step(self, batch, batch_nb):
+        model_input, ground_truth = batch
+        wf_values_out, coords_out = self.model(model_input['coords_sc'])
+        
+        ## Calculate the basic mean squared error loss using the training data
+        mse_loss = F.mse_loss(wf_values_out, ground_truth['wavefront_values_sc'])
+        avg_loss = wf_values_out.mean()**2 * 0.01 # Gentle pressure to have mean-zero across entire image.
+        tensorboard_logs = {'train/mse_loss':mse_loss,
+                            'train/avg_loss':avg_loss}
+
+        ## Calculate the loss used to jointly learn the wave velocity field (if learning it - )
+        if self.wavespeed_loss_scale in [None, 0, 0.]:
+            squared_slowness_tensor = torch.ones_like(coords_out) * self.squared_slowness
+            wavespeed_loss = 0
+        else:
+            slow_vals_out, _ = self.slowness_model(model_input['coords_sc'][...,1:]) # Omit the first channel (time)
+            squared_slowness_tensor = slow_vals_out.repeat(1,1,3)
+            # Gently push towards known a good value for squared_slowness
+            wavespeed_loss =  (slow_vals_out - self.squared_slowness).abs().mean()*self.wavespeed_loss_scale
+            tensorboard_logs['train/wavespeed_loss'] = wavespeed_loss
+            assert squared_slowness_tensor.shape == coords_out.shape
+
+        # Calculate the physics-based wave function loss
+        wave_loss_dict = wave_pml_2(wf_values_out, coords_out, squared_slowness_tensor)
+        wavefunc_loss = wave_loss_dict['diff_constraint_hom']*self.wavefunc_loss_scale # * min(1, (step/ total_steps)**2)
+        tensorboard_logs['train/wavefunc_loss'] = wavefunc_loss
+
+        train_loss = mse_loss + avg_loss + wavefunc_loss + wavespeed_loss
+
+        tensorboard_logs['train/loss'] = train_loss
+        tensorboard_logs['train/included_time_fraction'] = self.wf_train_dataset.included_time_fraction 
+
+        return {'loss': train_loss, 'log': tensorboard_logs}
+
+    def validation_step(self, batch, batch_nb):
+        model_input, ground_truth = batch
+        _, _, xdim, ydim, channels = model_input['coords_txyc'].shape
+        # Evaluate only on the center 1/2 of coordinate values (where valid wave data is likely)
+        stp = 3 # Step skipped between t,x,ycoordinates to evaluate (just to reduce memory usage)
+        eval_coords = model_input['coords_txyc'][:,::stp, xdim//4:-xdim//4:stp, ydim//4:-ydim//4:stp, :].reshape(1,-1,channels)
+        wf_values_out, _ = self.model(eval_coords)
+        loss = F.mse_loss(wf_values_out, ground_truth['wavefronts_txy'][:,::stp, xdim//4:-xdim//4:stp, ydim//4:-ydim//4:stp].reshape(1,-1,1))
+        return {'val_loss':loss}
+
+    def validation_epoch_end(self, outputs):
+        avg_loss = sum(x["val_loss"] for x in outputs) / len(outputs)
+        # Pass the accuracy to the `DictLogger` via the `'log'` key.
+        tensorboard_logs = {'val/avg_loss': avg_loss}
+        return {"val_loss": avg_loss, "log":tensorboard_logs}
+
+    def on_epoch_end(self):
+        # Add 10% of time samples to the current training batch each epoch
+        self.wf_train_dataset.included_time_fraction = min(1.0, self.wf_train_dataset.included_time_fraction + 0.1)
+
+    def configure_optimizers(self):
+        if self.wavespeed_loss_scale not in [None, 0, 0.]:
+            return Adam(itertools.chain(self.model.parameters(), self.slowness_model.parameters()), lr=self.learning_rate)
+        else:
+            return Adam(self.model.parameters(), lr=self.learning_rate)
+    
+    def setup(self, stage):        
+        if self.wf_valid_dataset is None:
+            self.wf_valid_dataset = WavefrontSupervisionDataset(self.video_filepath)
+        
+        if self.wf_train_dataset is None:
+            self.wf_train_dataset = MaskedWavefrontDataset(self.wf_valid_dataset)
+
+    def train_dataloader(self):
+                                           # Shuffling is handled by the chunk_dataset when sample_fraction < 1.0
+        return torch.utils.data.DataLoader(self.wf_train_dataset, batch_size=self.batch_size, shuffle=True, num_workers=8)
+
+    def val_dataloader(self):
+        return torch.utils.data.DataLoader(self.wf_valid_dataset, batch_size=1, shuffle=False, num_workers=8)

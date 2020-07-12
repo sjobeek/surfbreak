@@ -329,7 +329,7 @@ def get_trimmed_tensor(wf_labeling_training_video, start_s=5, duration_s=1.2, ti
 
 from surfbreak.supervision import wavefront_diff_tensor
 
-class CNNChunkDataset(Dataset):
+class WavefrontSupervisionDataset(Dataset):
     def __init__(self, video_filepath, wavecnn_ckpt=None, ydim=150, timerange=(0,61), time_chunk_duration_s=1, time_chunk_stride_s=1, time_axis_scale=0.5):
         super().__init__()
         from surfbreak.waveform_models import LitWaveCNN
@@ -340,8 +340,8 @@ class CNNChunkDataset(Dataset):
         self.time_chunk_duration_s = time_chunk_duration_s
         self.time_chunk_stride_s = time_chunk_stride_s
         self.t_coords_per_second = 10 * time_axis_scale
-        self.average_wavefront_xy = np.zeros(1)
-        self.std_wavefront_xy = np.zeros(1)
+        self.average_wavefront_xy = torch.zeros(1)
+        self.std_wavefront_xy = torch.zeros(1)
 
         start_s, end_s = timerange
         self.video_chunk_timeranges = np.array(list((start, start+time_chunk_duration_s) for start in
@@ -357,8 +357,8 @@ class CNNChunkDataset(Dataset):
         
         # Accumulate statistics for the wavefront images (mean and standard deviation)
         firstout, firstgt = self[0]
-        acc_avg_wf_img = np.zeros_like(firstgt['wavefronts_txy'].mean(axis=0))
-        acc_std_wf_img = np.zeros_like(firstgt['wavefronts_txy'])
+        acc_avg_wf_img = torch.zeros_like(firstgt['wavefronts_txy'].mean(axis=0))
+        acc_std_wf_img = torch.zeros_like(firstgt['wavefronts_txy'])
         for model_in, model_gt in self:
             acc_avg_wf_img += model_gt['wavefronts_txy'].mean(axis=0)
             acc_std_wf_img = np.concatenate((acc_std_wf_img, model_gt['wavefronts_txy']), axis=0)
@@ -405,15 +405,111 @@ class CNNChunkDataset(Dataset):
         all_coords = get_mgrid(vid_tensor_txy.shape, tcoord_range=this_chunk_tcoord_range)
 
         model_input = {
-            'coords_txyc':all_coords.reshape(*vid_tensor_txy.shape,3)
+            'coords_txyc':all_coords.reshape(*vid_tensor_txy.shape,3).clone()
         }
 
         assert vid_tensor_txy.shape == wavecnn_label.shape
         ground_truth = {
-            "video_txy": vid_tensor_txy,
-            "wavefronts_txy": wavecnn_label - self.average_wavefront_xy,
+            "video_txy": torch.tensor(vid_tensor_txy, dtype=torch.float),
+            "wavefronts_txy": (torch.from_numpy(wavecnn_label) - self.average_wavefront_xy).clone(),
             "timerange": (item_start_s, item_end_s),
-            "wavefront_loss_mask": self.std_wavefront_xy > self.std_wavefront_xy.mean()
+            "wavefront_loss_mask": torch.as_tensor(self.std_wavefront_xy > self.std_wavefront_xy.mean(), dtype=torch.bool)
         }
 
         return model_input, ground_truth
+
+class MaskedWavefrontDataset(Dataset):
+    def __init__(self, wf_supervision_dataset, samples_per_batch=300, included_time_fraction=1.0):
+        """Subsamples a (t,x,y,c) WaveformSupervisionDataset into individual (n,c) masked batches that can fit in memory"""
+        self.wf_supervision_dataset = wf_supervision_dataset
+        self.samples_per_batch = samples_per_batch
+        self.included_time_fraction = included_time_fraction
+        _, ground_truth = self.wf_supervision_dataset[0]
+        self.timesteps_per_segment = ground_truth['wavefronts_txy'].shape[0] # Time coordinate
+        self.total_values_per_masked_image = ground_truth['wavefront_loss_mask'].sum()
+        self.batches_per_image = max(1, int(self.total_values_per_masked_image // samples_per_batch))
+    
+    def __len__(self):
+        return int(len(self.wf_supervision_dataset) * self.timesteps_per_segment * self.batches_per_image)
+
+    def __getitem__(self, idx):
+        if self.included_time_fraction < 0.9999:
+            # Get a single index
+            idx = torch.randint(low=0, high=int(len(self)*self.included_time_fraction), size=(1,))
+      
+        segment_idx = int(idx // (self.timesteps_per_segment * self.batches_per_image))
+        this_video_first_idx = int(segment_idx * self.timesteps_per_segment * self.batches_per_image)
+        t_idx = int((idx - this_video_first_idx) // self.batches_per_image)
+        batch_idx = idx - ( (segment_idx * self.timesteps_per_segment * self.batches_per_image) 
+                            + (t_idx * self.batches_per_image))
+
+        # Get the waveform values and coordinates for this timestep of this video segment
+        model_input, ground_truth = self.wf_supervision_dataset[segment_idx]
+        wf_values_xy = ground_truth['wavefronts_txy'][t_idx]
+        coords_xyc = model_input['coords_txyc'][t_idx]
+        
+        # Mask and reshape to keep only useful values  
+        xy_mask = ground_truth['wavefront_loss_mask']
+        assert xy_mask.shape == wf_values_xy.shape
+        xyc_mask = xy_mask[...,None].repeat(1,1,3) # Add in 3 coordinate channels for t,x,y
+        assert xyc_mask.shape == coords_xyc.shape
+        
+        masked_wf_values_nc = wf_values_xy.reshape(-1,1)[xy_mask.reshape(-1,1)][...,None] # Add the one-dimensional channel dimension
+        masked_coords_nc = coords_xyc.reshape(-1,1)[xyc_mask.reshape(-1,1)].reshape(-1,3)
+        assert masked_wf_values_nc.shape[0] == masked_coords_nc.shape[0]
+        assert self.total_values_per_masked_image == masked_wf_values_nc.shape[0]
+        # Get evenly spaced samples from across the image
+        subsampled_wf_values_sc = masked_wf_values_nc[batch_idx::self.total_values_per_masked_image//self.samples_per_batch,:][:self.samples_per_batch]
+        subsampled_coords_sc =       masked_coords_nc[batch_idx::self.total_values_per_masked_image//self.samples_per_batch,:][:self.samples_per_batch]
+
+        model_input = {
+            #'coords_xyc': coords_xyc,
+            'coords_sc': subsampled_coords_sc
+        }
+
+        assert subsampled_coords_sc.shape[0] == subsampled_wf_values_sc.shape[0]
+
+        ground_truth = {
+            #"wavefront_values_xy": wf_values_xy,
+            "wavefront_values_sc": subsampled_wf_values_sc,
+            "timerange": ground_truth['timerange'],
+            "segment_idx":segment_idx,
+            "t_idx": t_idx,
+            "batch_idx": batch_idx
+        }
+
+        return model_input, ground_truth
+
+from datetime import datetime
+def cache_dataset_with_graphchain(dataset, cache_folder='./__graphchain_cache__'):
+    now = datetime.now() # current date and time
+    date_time = now.strftime("%m-%d-%Y_%H-%M-%S")
+    dataset_foldername = 'dataset_'+date_time
+    if not os.path.exists(os.path.join(cache_folder, dataset_foldername)):
+            os.makedirs(os.path.join(cache_folder, dataset_foldername))
+    tuple_filename_list = []
+    for idx, result_tuple in enumerate(dataset):
+        tuple_filename = os.path.join(cache_folder, dataset_foldername, 'tuple_'+str(idx)+'.pkl') 
+        with open(tuple_filename, 'wb') as f:
+                torch.save(result_tuple, f)
+        tuple_filename_list.append(tuple_filename)
+    return tuple_filename_list
+
+
+class CachedDataset(Dataset):
+    def __init__(self, dataset_class, *args, **kwargs):
+        """Caches a dataset as pickles using a unique time-based filename,
+           and will re-use previous cache if exists and the dataset class source hasn't changed"""
+        from dask.compatibility import apply
+        filename_graph = {'dataset':       (apply, dataset_class, args, kwargs), # equivalent to dataset_class(*args, **kwargs)
+                          'output_tuples': (cache_dataset_with_graphchain, 'dataset')}  
+        self.cached_tuple_filenames = graphchain.get(filename_graph, 'output_tuples')
+
+    def __len__(self):
+        return len(self.cached_tuple_filenames)
+
+    def __getitem__(self, idx):
+        tuple_filename = self.cached_tuple_filenames[idx]
+        with open(tuple_filename, 'rb') as f:
+                output = torch.load(f)
+        return output

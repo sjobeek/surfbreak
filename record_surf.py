@@ -35,7 +35,7 @@ if __name__ == "__main__":
         # Don't sleep on the first iteration
         if time.time() - start_time_s > 1:
             print(f"Sleeping for {args.minutes_between_recordings} minutes ({minutes_remaining:0.1f} minutes remaining total)")
-            time.sleep(args.minutes_between_recordings)
+            time.sleep(args.minutes_between_recordings*60)
 
         # Actually record the surf forecast and video 
         print(f"Starting recording for {args.surfspot}, duration {args.video_duration} minute(s). ")
