@@ -75,7 +75,7 @@ def plot_waveform_tensors(model, coords_txyc, wavefronts_txy, image_xy):
 	axes[2].set_title(f"t,y values over time   t range: {tmin:0.4f}, {tmax:0.4f}")
 	axes[2].set_xticklabels([]) # Prevent x coordinate values from covering text
 	axes[3].imshow(wavefront_tyslice.cpu().T)
-	axes[3].set_title("t,y wavefront training signal (left, center, right")
+	axes[3].set_title("t,y wavefront training signal (left, center, right)")
 	return fig
 
 def waveform_tensors_plot(waveform_out_txy, waveform_gt_txy, coords):

@@ -322,20 +322,26 @@ def detect_wavefronts(wf_cnn_checkpoint, video_tensor):
                                           video_tensor[1:][None,...] - video_tensor[:-1][None,...]), axis=0).transpose(1,0,2,3)
     return wavecnn_model(torch.from_numpy(input_img_array_tcxy))
 
-def get_trimmed_tensor(wf_labeling_training_video, start_s=5, duration_s=1.2, time_axis_scale=0.5):
+def get_trimmed_tensor(wf_labeling_training_video, start_s=5, duration_s=1.2, time_axis_scale=0.5, ydim_out=128, xdim_max=256):
     from surfbreak.pipelines import video_to_trimmed_tensor
-    wf_graph = video_to_trimmed_tensor(wf_labeling_training_video, start_s=start_s, duration_s=duration_s, time_axis_scale=time_axis_scale)
-    return graphchain.get(wf_graph, 'result')
+    wf_graph = video_to_trimmed_tensor(wf_labeling_training_video, start_s=start_s, duration_s=duration_s, time_axis_scale=time_axis_scale, ydim_out=ydim_out)
+    txy_array = graphchain.get(wf_graph, 'result') 
+    if txy_array.shape[1] > xdim_max:
+        return txy_array[:,:xdim_max] # TODO: Center this! 
+    else:
+        return txy_array 
 
 from surfbreak.supervision import wavefront_diff_tensor
 
 class WavefrontSupervisionDataset(Dataset):
-    def __init__(self, video_filepath, wavecnn_ckpt=None, ydim=150, timerange=(0,61), time_chunk_duration_s=1, time_chunk_stride_s=1, time_axis_scale=0.5):
+    def __init__(self, video_filepath, wavecnn_ckpt=None, ydim=128, timerange=(0,60), time_chunk_duration_s=1, time_chunk_stride_s=1, time_axis_scale=0.5,
+                 max_width=256):
         super().__init__()
         from surfbreak.waveform_models import LitWaveCNN
         self.video_filepath = video_filepath
         self.wavecnn_ckpt = wavecnn_ckpt
         self.ydim = ydim
+        self.max_width = max_width
         self.time_axis_scale = time_axis_scale
         self.time_chunk_duration_s = time_chunk_duration_s
         self.time_chunk_stride_s = time_chunk_stride_s
@@ -348,7 +354,7 @@ class WavefrontSupervisionDataset(Dataset):
                                                     range(start_s, end_s + 1 - time_chunk_duration_s, time_chunk_stride_s)))
         item_start_s, item_end_s = self.video_chunk_timeranges[0]
         self.first_raw_vid_tensor = get_trimmed_tensor(self.video_filepath, start_s=item_start_s, duration_s=(item_end_s - item_start_s),
-                                                       time_axis_scale=self.time_axis_scale)
+                                                       time_axis_scale=self.time_axis_scale, ydim_out=self.ydim, xdim_max=self.max_width)
         
         if self.wavecnn_ckpt is None:
             self.wavecnn_model = None
@@ -374,7 +380,7 @@ class WavefrontSupervisionDataset(Dataset):
         if self.wavecnn_model is None: # Use a simple time-delta of intensities if no CNN-based wave detector given
             vid_tensor_tplus3 = get_trimmed_tensor(self.video_filepath, start_s=item_start_s, 
                                                duration_s=(item_end_s - item_start_s + 3/self.t_coords_per_second), # Add one extra timestep here
-                                               time_axis_scale=self.time_axis_scale)
+                                               time_axis_scale=self.time_axis_scale, ydim_out=self.ydim, xdim_max=self.max_width)
             vid_tensor_txy = vid_tensor_tplus3[:-3] # Remove the extra timestep which was needed for the wavecnn input calculation
 
             wavecnn_label = normalize_tensor(wavefront_diff_tensor(vid_tensor_tplus3.transpose(1,2,0)).transpose(2,0,1), clip_max=1)
@@ -382,7 +388,7 @@ class WavefrontSupervisionDataset(Dataset):
         else: # Do inference using a CNN
             vid_tensor_tplus1 = get_trimmed_tensor(self.video_filepath, start_s=item_start_s, 
                                                duration_s=(item_end_s - item_start_s + 1/self.t_coords_per_second), # Add one extra timestep here
-                                               time_axis_scale=self.time_axis_scale)
+                                               time_axis_scale=self.time_axis_scale, ydim_out=self.ydim, xdim_max=self.max_width)
             vid_tensor_txy = vid_tensor_tplus1[:-1] # Remove the extra timestep which was needed for the wavecnn input calculation
                                                
             wavecnn_input_tcxy = np.concatenate((vid_tensor_tplus1[:-1][None,...],  # Get a 2-channel representation (intensity, timedelta)
@@ -419,7 +425,7 @@ class WavefrontSupervisionDataset(Dataset):
         return model_input, ground_truth
 
 class MaskedWavefrontDataset(Dataset):
-    def __init__(self, wf_supervision_dataset, samples_per_batch=300, included_time_fraction=1.0):
+    def __init__(self, wf_supervision_dataset, samples_per_batch=1000, included_time_fraction=1.0, resample_fraction=True):
         """Subsamples a (t,x,y,c) WaveformSupervisionDataset into individual (n,c) masked batches that can fit in memory"""
         self.wf_supervision_dataset = wf_supervision_dataset
         self.samples_per_batch = samples_per_batch
@@ -428,12 +434,13 @@ class MaskedWavefrontDataset(Dataset):
         self.timesteps_per_segment = ground_truth['wavefronts_txy'].shape[0] # Time coordinate
         self.total_values_per_masked_image = ground_truth['wavefront_loss_mask'].sum()
         self.batches_per_image = max(1, int(self.total_values_per_masked_image // samples_per_batch))
+        self.resample_fraction=resample_fraction
     
     def __len__(self):
-        return int(len(self.wf_supervision_dataset) * self.timesteps_per_segment * self.batches_per_image)
+        return int(len(self.wf_supervision_dataset) * self.timesteps_per_segment * self.batches_per_image * self.included_time_fraction)
 
     def __getitem__(self, idx):
-        if self.included_time_fraction < 0.9999:
+        if self.resample_fraction:
             # Get a single index
             idx = torch.randint(low=0, high=int(len(self)*self.included_time_fraction), size=(1,))
       

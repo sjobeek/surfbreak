@@ -254,9 +254,9 @@ class LitWaveCNN(pl.LightningModule):
 
 
 class WaveformNet(pl.LightningModule):    # With no gradient or wave loss, oemega values of (1, 5) work well (best at epochs 3~5)  
-    def __init__(self, hidden_features=256, hidden_layers=3, first_omega_0=1.0, hidden_omega_0=5.0, squared_slowness=3.0,
-                 learning_rate=1e-4, wavefunc_loss_scale=1e-7, wavespeed_loss_scale=1e-2, 
-                 video_filepath=None, train_dataset=None, valid_dataset=None, batch_size=20):
+    def __init__(self, hidden_features=256, hidden_layers=3, first_omega_0=2.5, hidden_omega_0=11, squared_slowness=0.2,
+                 learning_rate=1e-4, wavefunc_loss_scale=5.5e-9, wavespeed_loss_scale=4e-4, 
+                 video_filepath=None, train_dataset=None, valid_dataset=None, viz_dataset=None, batch_size=64):
         """Learns a low-dimensional function which maps t,x,y video coordinates to waveform magnitude. 
            The model applies a physics-based waveform cost function to regularize the signal, using a 2nd-order PDE (see the SIREN paper).
            The model also jointly inferrs the static wave propogation velocity field used the waveform loss (in units of squared slowness).             
@@ -288,6 +288,7 @@ class WaveformNet(pl.LightningModule):    # With no gradient or wave loss, oemeg
         self.wavespeed_loss_scale=wavespeed_loss_scale
         self.wf_train_dataset = train_dataset
         self.wf_valid_dataset = valid_dataset
+        self.viz_dataset = viz_dataset
         self.video_filepath = video_filepath
         self.batch_size = batch_size
 
@@ -332,15 +333,35 @@ class WaveformNet(pl.LightningModule):    # With no gradient or wave loss, oemeg
 
     def validation_step(self, batch, batch_nb):
         model_input, ground_truth = batch
-        _, _, xdim, ydim, channels = model_input['coords_txyc'].shape
-        # Evaluate only on the center 1/2 of coordinate values (where valid wave data is likely)
-        stp = 3 # Step skipped between t,x,ycoordinates to evaluate (just to reduce memory usage)
-        eval_coords = model_input['coords_txyc'][:,::stp, xdim//4:-xdim//4:stp, ydim//4:-ydim//4:stp, :].reshape(1,-1,channels)
-        wf_values_out, _ = self.model(eval_coords)
-        loss = F.mse_loss(wf_values_out, ground_truth['wavefronts_txy'][:,::stp, xdim//4:-xdim//4:stp, ydim//4:-ydim//4:stp].reshape(1,-1,1))
+        wf_values_out, _ = self.model(model_input['coords_sc'])
+        loss = F.mse_loss(wf_values_out, ground_truth['wavefront_values_sc'])
         return {'val_loss':loss}
 
     def validation_epoch_end(self, outputs):
+
+        if self.viz_dataset is not None:
+            model_input, ground_truth = self.viz_dataset[0]
+            coords_txyc = model_input['coords_txyc'].cuda()        # Removing the batch dimension
+            wavefronts_txy = ground_truth['wavefronts_txy'].cuda() # Removing the batch dimension
+            first_video_image_xy = ground_truth['video_txy'][0].cuda() # First batch, first image
+            fig0 = train_utils.plot_waveform_tensors(self.model, coords_txyc, wavefronts_txy, first_video_image_xy)
+            self.logger.experiment.add_figure(f'valchunk0/waveforms', fig0, self.current_epoch)
+
+            # Squared slowness estimate is independent of batch, so only calculate this once
+            if self.wavespeed_loss_scale not in [None, 0, 0.]:
+                # Calcuate and plot the inferred squared_slowness field in x and y
+                slow_vals_out, _ = self.slowness_model(coords_txyc[0,:,:,1:].reshape(-1,2)) # Skipping the first T channel
+                slow_vals_array = slow_vals_out.reshape(coords_txyc[0,:,:,0].shape).cpu().detach().numpy()
+                img_aspect = coords_txyc.shape[2]/coords_txyc.shape[3]
+                fig2 = plt.figure(figsize=(10,5))
+                img = plt.imshow(slow_vals_array.T)
+                plt.title('Squared slowness estimate')
+                if img_aspect > 1:
+                    plt.colorbar(img, fraction=0.046, pad=0.15, orientation='horizontal')
+                else:
+                    plt.colorbar(img, fraction=0.046, pad=0.04, orientation='vertical')
+                self.logger.experiment.add_figure('squared_slowness', fig2, self.current_epoch)
+                self.slowness_model.cuda()
         avg_loss = sum(x["val_loss"] for x in outputs) / len(outputs)
         # Pass the accuracy to the `DictLogger` via the `'log'` key.
         tensorboard_logs = {'val/avg_loss': avg_loss}
@@ -365,7 +386,7 @@ class WaveformNet(pl.LightningModule):    # With no gradient or wave loss, oemeg
 
     def train_dataloader(self):
                                            # Shuffling is handled by the chunk_dataset when sample_fraction < 1.0
-        return torch.utils.data.DataLoader(self.wf_train_dataset, batch_size=self.batch_size, shuffle=True, num_workers=8)
+        return torch.utils.data.DataLoader(self.wf_train_dataset, batch_size=self.batch_size, shuffle=True, num_workers=4)
 
     def val_dataloader(self):
-        return torch.utils.data.DataLoader(self.wf_valid_dataset, batch_size=1, shuffle=False, num_workers=8)
+        return torch.utils.data.DataLoader(self.wf_valid_dataset, batch_size=self.batch_size, shuffle=False, num_workers=4)
