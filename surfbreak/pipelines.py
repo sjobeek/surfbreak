@@ -104,6 +104,45 @@ def wavedetection_cnn_training(training_video):
     }
     return dask_graph
 
+def video_to_trimmed_array_yxt(video_filename, duration_s, start_s, surfspot=None, calibration_videos=None):
+    """ Image tensors are 10hz by default (1/6th of the frames from a of 60Hz video)"""
+    if surfspot is None and calibration_videos is None:
+        filename_header = video_filename.split('/')[-1].split('_')[0]
+        if filename_header in SURFSPOT_CALIBRATION_VIDEOS.keys():
+            surfspot = filename_header
+        else:
+            raise ValueError('surfspot cannot be inferred from filename,'
+                             'and both `surfspot` and `calibration_videos` are unspecified.\n'
+                             'Please specify surfspot present in pipelines.SURFSPOT_CALIBRATION_VIDEOS.')
+    if calibration_videos is None:
+        calibration_videos = SURFSPOT_CALIBRATION_VIDEOS[surfspot]
+    
+    dask_graph = {
+        'calibration_ranges': (transform.run_surfzone_detection, calibration_videos),
+        'result': (transform.video_file_to_trimmed_image_xyt, video_filename, 'calibration_ranges', duration_s, start_s)
+    }
+    return dask_graph
+
+
+def video_to_waveform_tensor_simple(video_filename, ydim_out, slice_xrange=None,
+                             start_s=0, duration_s=30, time_axis_scale=0.5, 
+                             output_dim=3, calibration_videos=None, surfspot=None):
+    
+    # Get a little more than the required duration for the raw video, then clip to the appropriate length
+    # (pre-processing with delta-time result 2 less samples)
+    """ Image tensors are 10hz by default (1/6th of the frames from a of 60Hz video)"""
+    dask_graph = video_to_trimmed_array_yxt(video_filename, duration_s+1, start_s, 
+                                                  surfspot=surfspot, calibration_videos=calibration_videos)
+    dask_graph['trimmed_array_yxt'] = dask_graph['result']
+    dask_graph.pop('result') # Remove this key
+    dask_graph['clipped_image_array'] = (supervision.vertical_waveform_slice,'trimmed_array_yxt', slice_xrange, output_dim)
+    dask_graph['trimmed_video_array'] = (datasets.raw_wavefront_array_to_normalized_txy, 'clipped_image_array', ydim_out, duration_s, 
+                                         time_axis_scale, 10) #SAMPLING_HZ
+    dask_graph['waveform_slice'] = (supervision.generate_waveform_slice, 'trimmed_array_yxt', slice_xrange, output_dim)
+    dask_graph['trimmed_wavefront_array'] = (datasets.raw_wavefront_array_to_normalized_txy, 'waveform_slice', ydim_out, duration_s, 
+                             time_axis_scale, 10, 1.0) #SAMPLING_HZ, clip_max (clipping wavefronts to max 1.0 very important)
+    return dask_graph
+
 
 if __name__ == "__main__":
     video = '../tmp/shirahama_1590387334_SURF-93cm.ts'

@@ -70,6 +70,8 @@ def dilate_tensor(image_tensor, erode_size=2, dilation_size=5, clip_range=(0.1, 
     return dilated_tensor
 
 def vertical_waveform_slice(wavefront_tensor, xrange=(30,50), output_dim=2):
+    if xrange is None:
+        xrange = (0, wavefront_tensor.shape[1])
     if output_dim == 2:
         return wavefront_tensor[:,xrange[0]:xrange[1]].mean(axis=1)
     elif output_dim == 3:

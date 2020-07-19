@@ -223,9 +223,32 @@ def run_surfcam_calibration(calibration_videos, num_workers=3):
     calibration_params = find_surfspot_calibration_params(acc_mean_flow, acc_xrange, acc_yrange)
     return calibration_params
 
+def run_surfzone_detection(calibration_videos, num_workers=3):
+    """Runs the optical flow fitting pipeline on the calibration videos, 
+       then calculates and returns an accumulated xrange,yrange tuple for all videos"""
+    video_mean_flows = []
+    for vid in calibration_videos:
+        flow_fit_graph = pipelines.vid_to_fit_mean_flow_graph(vid, n_samples=10, duration_s=2)
+
+        with dask.config.set(num_workers=num_workers):
+            meanflow, xyrange, yrange = graphchain.get(flow_fit_graph, 'result', scheduler=dask.threaded.get)
+        video_mean_flows.append(meanflow)
+
+    # Ignore the fit ranges from the individual videos, and re-fit across videos
+    acc_mean_flow, acc_xrange, acc_yrange = detection.fit_mean_flows(video_mean_flows, draw_fit=True)
+
+    return acc_xrange, acc_yrange
+
 def video_file_to_calibrated_image_tensors(video_file, calibration_params, duration_s, start_s, one_image_per_n_frames=6):
     frames = load_videos.decode_frame_sequence(video_file, duration_s=duration_s, start_s=start_s, RGB=True,
                                                   one_image_per_n_frames=one_image_per_n_frames)
     img_tensor = np.stack([normalize_image(frame, **calibration_params, greyscale=True)
                            for frame in frames], axis=-1)
     return img_tensor
+
+def video_file_to_trimmed_image_xyt(video_file, trim_ranges, duration_s, start_s, one_image_per_n_frames=6):
+    frames = load_videos.decode_frame_sequence(video_file, duration_s=duration_s, start_s=start_s, RGB=True,
+                                                  one_image_per_n_frames=one_image_per_n_frames)
+    img_tensor = np.stack([detection.trim_image(cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY), trim_ranges[0], trim_ranges[1])
+                           for frame in frames], axis=-1)
+    return img_tensor                                     

@@ -103,6 +103,13 @@ def avg_wave_flows(video_file, start_s, duration_s=1):
 
     return xy_cube.mean(axis=3)
 
+def greyscale_video_segment(video_file, start_s, duration_s=1):
+    "Returns a tuple of (mean, std) for each (x,y) pixel location"
+    frames = load_videos.decode_frame_sequence(video_file, duration_s=duration_s, start_s=start_s, RGB=True,
+                                                  one_image_per_n_frames=4)
+    greyscale_cube = np.dstack(tuple(cv2.cvtColor(img, cv2.COLOR_RGB2GRAY) for img in frames))
+    return greyscale_cube
+
 def accumulate_flows(avg_flows):
     mean_flow = np.stack(avg_flows,axis=3).mean(axis=3)
     return mean_flow
@@ -114,8 +121,6 @@ def fit_mean_flows(avg_flows, draw_fit=False):
     xrange, yrange = heatmap_fit(mean_flow_mag, draw_fit=draw_fit)
 
     return mean_flow, xrange, yrange
-
-
 
 # Cell
 def get_sample_start_times(video_file, n_samples=10, duration_s=1):
@@ -130,7 +135,8 @@ def get_sample_start_times(video_file, n_samples=10, duration_s=1):
 
 def detect_surfzone(video_file, n_samples=10, processes=4, draw_fit=False, scheduler='threads'):
     """Detects the region of the image which contains breaking waves, using cached graph
-        Returns a 3-tuple (mean_flow_xy, xrange, yrange):"""
+        Returns a 3-tuple (mean_flow_xy, xrange, yrange):
+        #TODO: Replace this with something faster to calculate (slow, but works OK for now)"""
     start_times = get_sample_start_times(video_file, n_samples=n_samples)
     print("Video subsample start times (seconds):", start_times)
     average_flows = [avg_wave_flows(video_file, start_s=st, duration_s=1)
