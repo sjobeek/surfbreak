@@ -18,7 +18,7 @@ from optuna.integration import PyTorchLightningPruningCallback
 
 from surfbreak.loss_functions import wave_pml 
 from surfbreak.datasets import (WaveformVideoDataset, WaveformChunkDataset, InferredWaveformDataset, 
-                                WavefrontSupervisionDataset, MaskedWavefrontDataset)
+                                WavefrontSupervisionDataset, MaskedWavefrontDataset, MaskedCNNWavefrontDataset)
 from surfbreak import base_models, diff_operators
 
 from surfbreak.loss_functions import wave_pml_2
@@ -192,23 +192,28 @@ class LitSirenNet(pl.LightningModule):    # With no gradient or wave loss, oemeg
 
 
 class LitWaveCNN(pl.LightningModule): 
-    def __init__(self, video_filepath, learning_rate=1e-4, wf_model_checkpoint=None, xrange=(10,130), timerange=(0,31), chunk_duration=30, chunk_stride=15,
-                 n_input_channels=2):
-        """steps_per_vid_chunk defines the single-tensor resampled dataset length"""
+    def __init__(self, video_filepath, learning_rate=1e-4, wf_model_checkpoint=None, ydim=128,
+                 train_dataset=None, val_dataset=None, batch_size=8,
+                 timerange=(0,30), val_timerange=(30,40), chunk_duration=1, chunk_stride=1, n_input_channels=2):
+        """"""
         super().__init__()
-        self.save_hyperparameters('video_filepath', 'learning_rate','xrange', 'timerange', 'chunk_duration')
+        self.save_hyperparameters('video_filepath', 'learning_rate', 'timerange', 'chunk_duration')
         self.model = base_models.WaveUnet(n_class=1, n_input_channels=n_input_channels)
        
         self.video_filepath = video_filepath
         self.learning_rate=learning_rate
         self.timerange=timerange
+        self.val_timerange=val_timerange
         self.chunk_duration=chunk_duration
         self.chunk_stride=chunk_stride
-        self.xrange = xrange
+        self.ydim = ydim
         self.n_input_channels=n_input_channels
         self.wf_model_checkpoint = wf_model_checkpoint
+        self.train_dataset=train_dataset
+        self.val_dataset=val_dataset
+        self.batch_size=batch_size
         
-        self.example_input_array = torch.ones(1,n_input_channels,256,256)
+        self.example_input_array = torch.ones(1,n_input_channels,128,256)
 
     def forward(self, data):
         return self.model(data)
@@ -217,15 +222,20 @@ class LitWaveCNN(pl.LightningModule):
         model_input, ground_truth = batch
         wf_values_out = self.model(model_input)
         mse_loss = F.mse_loss(wf_values_out, ground_truth)
-        tensorboard_logs = {'train/mse_loss':mse_loss}
-        return {'loss': mse_loss, 'log': tensorboard_logs}
+        # Gentle pressure to have mean-zero across entire image
+        zeromean_loss = wf_values_out.mean()**2 * 0.01
+        loss = mse_loss + zeromean_loss
+
+        tensorboard_logs = {'train/loss':loss,
+                            'train/mse_loss': mse_loss,
+                            'train/avg_loss': zeromean_loss}
+        return {'loss': loss, 'log': tensorboard_logs}
 
     def validation_step(self, batch, batch_nb):
         model_input, ground_truth = batch
         model_output = self.model(model_input)
         loss = F.mse_loss(model_output, ground_truth)
         return {'val_loss':loss}
-
 
     def validation_epoch_end(self, outputs):
         avg_loss = sum(x["val_loss"] for x in outputs) / len(outputs)
@@ -236,26 +246,26 @@ class LitWaveCNN(pl.LightningModule):
         return Adam(self.model.parameters(), lr=self.learning_rate)
     
     def setup(self, stage):
-        # Train on a dataset consisting of 30-second chunks offset by 30 seconds
-        self.wf_train_video_dataset = WaveformVideoDataset(self.video_filepath, ydim=120, xrange=self.xrange, timerange=self.timerange, 
-                                                           time_chunk_duration_s=self.chunk_duration, 
-                                                           time_chunk_stride_s=self.chunk_stride, time_axis_scale=0.5)
-        assert self.wf_model_checkpoint is not None, "Cannot train this detector without a pre-trained waveform model (wf_model_checkpoint=None)"
-        wf_model = LitSirenNet.load_from_checkpoint(self.wf_model_checkpoint, video_filepath=self.video_filepath)
-        self.inferred_waveform_dataset = InferredWaveformDataset(self.video_filepath, wf_model, ydim=120, xrange=self.xrange, timerange=self.timerange, 
-                                                           time_chunk_duration_s=self.chunk_duration, 
-                                                           time_chunk_stride_s=self.chunk_stride, time_axis_scale=0.5)
+        if self.train_dataset is None:
+            self.train_wfs_dataset = WavefrontSupervisionDataset(self.video_filepath, ydim=self.ydim, timerange=self.timerange,
+                                                                time_chunk_duration_s=self.chunk_duration, time_chunk_stride_s=self.chunk_stride)
+            self.train_dataset = MaskedCNNWavefrontDataset(self.train_wfs_dataset)
+        if self.val_dataset is None:
+            self.val_wfs_dataset = WavefrontSupervisionDataset(self.video_filepath, ydim=self.ydim, timerange=self.val_timerange,
+                                                                time_chunk_duration_s=self.chunk_duration, time_chunk_stride_s=self.chunk_stride)
+            self.val_dataset = MaskedCNNWavefrontDataset(self.val_wfs_dataset)
 
     def train_dataloader(self):
-        return torch.utils.data.DataLoader(self.inferred_waveform_dataset, batch_size=20, shuffle=True, num_workers=4)
+        return torch.utils.data.DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=True, num_workers=4)
 
     def val_dataloader(self):
-        return torch.utils.data.DataLoader(self.inferred_waveform_dataset, batch_size=1, shuffle=False, num_workers=4)
+        return torch.utils.data.DataLoader(self.val_dataset, batch_size=self.batch_size, shuffle=False, num_workers=4)
 
 
 class WaveformNet(pl.LightningModule):    # With no gradient or wave loss, oemega values of (1, 5) work well (best at epochs 3~5)  
     def __init__(self, hidden_features=256, hidden_layers=3, first_omega_0=2.5, hidden_omega_0=11, squared_slowness=0.2,
                  learning_rate=1e-4, wavefunc_loss_scale=5.5e-9, wavespeed_loss_scale=4e-4, 
+                 wavespeed_first_omega_0=3.5, wavespeed_hidden_omega_0=15, 
                  video_filepath=None, train_dataset=None, valid_dataset=None, viz_dataset=None, batch_size=64):
         """Learns a low-dimensional function which maps t,x,y video coordinates to waveform magnitude. 
            The model applies a physics-based waveform cost function to regularize the signal, using a 2nd-order PDE (see the SIREN paper).
@@ -278,8 +288,8 @@ class WaveformNet(pl.LightningModule):    # With no gradient or wave loss, oemeg
                                             out_features=1, 
                                             hidden_features=64,
                                             hidden_layers=2, outermost_linear=True,
-                                            first_omega_0=3.5, #1.5
-                                            hidden_omega_0=15., #10.
+                                            first_omega_0=wavespeed_first_omega_0, #1.5
+                                            hidden_omega_0=wavespeed_hidden_omega_0, #10.
                                             softmax_output=True) # Prevent negative or zero squared slowness values from ruining the physics
 
         self.learning_rate=learning_rate
@@ -303,7 +313,8 @@ class WaveformNet(pl.LightningModule):    # With no gradient or wave loss, oemeg
         
         ## Calculate the basic mean squared error loss using the training data
         mse_loss = F.mse_loss(wf_values_out, ground_truth['wavefront_values_sc'])
-        avg_loss = wf_values_out.mean()**2 * 0.01 # Gentle pressure to have mean-zero across entire image.
+        # TODO: Devise method to normalize unsampled regions to have zero average amplitude
+        avg_loss = (wf_values_out**2).mean() * 1e-6 # Gentle pressure to have zero amplitude across entire video.
         tensorboard_logs = {'train/mse_loss':mse_loss,
                             'train/avg_loss':avg_loss}
 
@@ -334,6 +345,12 @@ class WaveformNet(pl.LightningModule):    # With no gradient or wave loss, oemeg
     def validation_step(self, batch, batch_nb):
         model_input, ground_truth = batch
         wf_values_out, _ = self.model(model_input['coords_sc'])
+        if batch_nb < 5:
+            self.logger.experiment.add_histogram('val/tcoords', model_input['coords_sc'][...,0], self.current_epoch)
+            self.logger.experiment.add_histogram('val/xcoords', model_input['coords_sc'][...,1], self.current_epoch)
+            self.logger.experiment.add_histogram('val/ycoords', model_input['coords_sc'][...,2], self.current_epoch)
+            self.logger.experiment.add_histogram('val/wf_values_out', wf_values_out, self.current_epoch)
+
         loss = F.mse_loss(wf_values_out, ground_truth['wavefront_values_sc'])
         return {'val_loss':loss}
 

@@ -124,7 +124,7 @@ def video_to_trimmed_array_yxt(video_filename, duration_s, start_s, surfspot=Non
     return dask_graph
 
 
-def video_to_waveform_tensor_simple(video_filename, ydim_out, slice_xrange=None,
+def video_to_waveform_array_txy(video_filename, ydim_out, slice_xrange=None,
                              start_s=0, duration_s=30, time_axis_scale=0.5, 
                              output_dim=3, calibration_videos=None, surfspot=None):
     
