@@ -19,7 +19,7 @@ def run_waveform_hyperparam_search(objective, n_trials=100, timeout=1*60*60, mod
     else:
         pruner = optuna.pruners.NopPruner()
     study = optuna.create_study(direction="minimize", pruner=pruner)
-    study.optimize(objective, n_trials=n_trials, timeout=timeout) # run for 30 minutes or 100 trials
+    study.optimize(objective, n_trials=n_trials, timeout=timeout) 
 
     print("Number of finished trials: {}".format(len(study.trials)))
     trial = study.best_trial

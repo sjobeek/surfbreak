@@ -323,10 +323,15 @@ class WaveformNet(pl.LightningModule):    # With no gradient or wave loss, oemeg
             squared_slowness_tensor = torch.ones_like(coords_out) * self.squared_slowness
             wavespeed_loss = 0
         else:
-            slow_vals_out, _ = self.slowness_model(model_input['coords_sc'][...,1:]) # Omit the first channel (time)
+            slow_vals_out, slow_coords_out = self.slowness_model(model_input['coords_sc'][...,1:]) # Omit the first channel (time)
             squared_slowness_tensor = slow_vals_out.repeat(1,1,3)
             # Gently push towards known a good value for squared_slowness
             wavespeed_loss =  (slow_vals_out - self.squared_slowness).abs().mean()*self.wavespeed_loss_scale
+            #TODO: Add in an (optional) loss term that encourages smooth, low-frequency wavespeed fields 
+            #grad_loss    =  diff_operators.gradient(slow_vals_out, slow_coords_out).abs().mean()*self.grad_loss_scale
+            #laplace_loss =  diff_operators.laplace(slow_vals_out, slow_coords_out).abs().mean()*self.grad_loss_scale*0.1
+            #tensorboard_logs['train/ws_grad_loss'] = grad_loss
+            #tensorboard_logs['train/ws_laplace_loss'] = laplace_loss
             tensorboard_logs['train/wavespeed_loss'] = wavespeed_loss
             assert squared_slowness_tensor.shape == coords_out.shape
 
