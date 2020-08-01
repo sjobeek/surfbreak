@@ -124,15 +124,19 @@ def video_to_trimmed_array_yxt(video_filename, duration_s, start_s, surfspot=Non
     return dask_graph
 
 
-def video_to_waveform_array_txy(video_filename, ydim_out, slice_xrange=None,
+def video_to_waveform_array_txy(video_filename, ydim_out, slice_xrange=None, calibrate=False,
                              start_s=0, duration_s=30, time_axis_scale=0.5, 
                              output_dim=3, calibration_videos=None, surfspot=None):
     
     # Get a little more than the required duration for the raw video, then clip to the appropriate length
     # (pre-processing with delta-time result 2 less samples)
     """ Image tensors are 10hz by default (1/6th of the frames from a of 60Hz video)"""
-    dask_graph = video_to_trimmed_array_yxt(video_filename, duration_s+1, start_s, 
-                                                  surfspot=surfspot, calibration_videos=calibration_videos)
+    if calibrate:
+        dask_graph = video_to_calibrated_image_tensor(video_filename, duration_s+1, start_s, 
+                                                    surfspot=surfspot, calibration_videos=calibration_videos)
+    else:
+        dask_graph = video_to_trimmed_array_yxt(video_filename, duration_s+1, start_s, 
+                                                    surfspot=surfspot, calibration_videos=calibration_videos)
     dask_graph['trimmed_array_yxt'] = dask_graph['result']
     dask_graph.pop('result') # Remove this key
     dask_graph['clipped_image_array'] = (supervision.vertical_waveform_slice,'trimmed_array_yxt', slice_xrange, output_dim)

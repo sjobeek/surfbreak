@@ -323,21 +323,22 @@ def detect_wavefronts(wf_cnn_checkpoint, video_tensor):
                                           video_tensor[1:][None,...] - video_tensor[:-1][None,...]), axis=0).transpose(1,0,2,3)
     return wavecnn_model(torch.from_numpy(input_img_array_tcxy))
 
-def get_trimmed_tensor(wf_labeling_training_video, graph_key='trimmed_wavefront_array',
+def get_trimmed_tensor(wf_labeling_training_video, graph_key='trimmed_wavefront_array', calibrate=True,
                        start_s=5, duration_s=1.2, time_axis_scale=0.5, ydim_out=128, xdim_max=None):
     from surfbreak.pipelines import video_to_trimmed_tensor
-    wf_graph = pipelines.video_to_waveform_array_txy(wf_labeling_training_video, start_s=start_s, duration_s=duration_s, time_axis_scale=time_axis_scale, ydim_out=ydim_out)
+    wf_graph = pipelines.video_to_waveform_array_txy(wf_labeling_training_video, ydim_out=ydim_out, calibrate=calibrate,
+                                                     start_s=start_s, duration_s=duration_s, time_axis_scale=time_axis_scale)
     txy_array = graphchain.get(wf_graph, graph_key) 
     if xdim_max is not None and txy_array.shape[1] > xdim_max:
-        return txy_array[:,:xdim_max] # TODO: Center this! 
+        return trim_img_to_nearest_multiple(txy_array[:,:xdim_max], divisor=4) # TODO: Center this! 
     else:
-        return txy_array 
+        return trim_img_to_nearest_multiple(txy_array, divisor=4) # Ensure the dimensions are compativle with CNN dilation 
 
 from surfbreak.supervision import wavefront_diff_tensor
 
 class WavefrontSupervisionDataset(Dataset):
-    def __init__(self, video_filepath, ydim=128, timerange=(0,60), time_chunk_duration_s=1, time_chunk_stride_s=1, time_axis_scale=0.5,
-                 max_width=None):
+    def __init__(self, video_filepath, ydim=128, timerange=(0,60), time_chunk_duration_s=2, time_chunk_stride_s=2, time_axis_scale=0.5,
+                 max_width=None, calibrate_h=True):
         super().__init__()
         from surfbreak.waveform_models import LitWaveCNN
         self.video_filepath = video_filepath
@@ -349,13 +350,15 @@ class WavefrontSupervisionDataset(Dataset):
         self.t_coords_per_second = 10 * time_axis_scale
         self.average_wavefront_xy = torch.zeros(1)
         self.std_wavefront_xy = torch.zeros(1)
+        self.calibrate_h=calibrate_h
 
         start_s, end_s = timerange
         self.video_chunk_timeranges = np.array(list((start, start+time_chunk_duration_s) for start in
                                                     range(start_s, end_s + 1 - time_chunk_duration_s, time_chunk_stride_s)))
         item_start_s, item_end_s = self.video_chunk_timeranges[0]
-        self.first_raw_vid_tensor = get_trimmed_tensor(self.video_filepath, start_s=item_start_s, duration_s=(item_end_s - item_start_s),
-                                                       time_axis_scale=self.time_axis_scale, ydim_out=self.ydim, xdim_max=self.max_width)
+        self.first_raw_vid_tensor = get_trimmed_tensor(self.video_filepath, ydim_out=self.ydim, calibrate=self.calibrate_h, 
+                                                       start_s=item_start_s, duration_s=(item_end_s - item_start_s),
+                                                       time_axis_scale=self.time_axis_scale, xdim_max=self.max_width)
                 
         # Accumulate statistics for the wavefront images (mean and standard deviation)
         firstout, firstgt = self[0]
@@ -373,12 +376,12 @@ class WavefrontSupervisionDataset(Dataset):
     def __getitem__(self, idx):
         item_start_s, item_end_s = self.video_chunk_timeranges[idx]
         
-        vid_tensor_txy = get_trimmed_tensor(self.video_filepath, graph_key='trimmed_video_array',
+        vid_tensor_txy = get_trimmed_tensor(self.video_filepath, graph_key='trimmed_video_array', calibrate=self.calibrate_h, 
                                             start_s=item_start_s, 
                                             duration_s=(item_end_s - item_start_s), # Add one extra timestep here
                                             time_axis_scale=self.time_axis_scale, ydim_out=self.ydim, xdim_max=self.max_width)
 
-        wf_tensor_txy = get_trimmed_tensor(self.video_filepath, graph_key='trimmed_wavefront_array',
+        wf_tensor_txy = get_trimmed_tensor(self.video_filepath, graph_key='trimmed_wavefront_array', calibrate=self.calibrate_h, 
                                             start_s=item_start_s, 
                                             duration_s=(item_end_s - item_start_s), # Add one extra timestep here
                                             time_axis_scale=self.time_axis_scale, ydim_out=self.ydim, xdim_max=self.max_width)
@@ -415,11 +418,9 @@ class InferredWavefrontDataset(Dataset):
         from surfbreak.waveform_models import LitWaveCNN
         self.wfs_dataset = wfs_dataset
         self.wavecnn_ckpt = wavecnn_ckpt
-        self.avg_cnnwf_xy = torch.zeros(1)
-        self.std_cnnwf_xy = torch.zeros(1)
-        
         self.wavecnn_model = LitWaveCNN.load_from_checkpoint(wavecnn_ckpt).cuda()
         
+    def get_wf_stats(self):
         # Accumulate statistics for the wavefront images (mean and standard deviation)
         firstout, firstgt = self[0]
         acc_avg_wf_img = torch.zeros_like(firstgt['wavefronts_txy'].mean(axis=0))
@@ -427,8 +428,9 @@ class InferredWavefrontDataset(Dataset):
         for model_in, model_gt in self:
             acc_avg_wf_img += model_gt['wavefronts_txy'].mean(axis=0)
             acc_std_wf_img = np.concatenate((acc_std_wf_img, model_gt['wavefronts_txy']), axis=0)
-        self.avg_cnnwf_xy = acc_avg_wf_img / len(self)
-        self.std_cnnwf_xy = acc_std_wf_img.std(axis=0)
+        avg_cnnwf_xy = acc_avg_wf_img / len(self)
+        std_cnnwf_xy = acc_std_wf_img.std(axis=0)
+        return avg_cnnwf_xy, std_cnnwf_xy
         
     def __len__(self):
         return len(self.wfs_dataset)

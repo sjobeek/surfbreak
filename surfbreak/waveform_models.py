@@ -301,6 +301,7 @@ class WaveformNet(pl.LightningModule):    # With no gradient or wave loss, oemeg
         self.viz_dataset = viz_dataset
         self.video_filepath = video_filepath
         self.batch_size = batch_size
+        self.inferred_slowness=None
 
         self.example_input_array = torch.ones(1,1337,3)
 
@@ -360,11 +361,16 @@ class WaveformNet(pl.LightningModule):    # With no gradient or wave loss, oemeg
         return {'val_loss':loss}
 
     def validation_epoch_end(self, outputs):
-
         if self.viz_dataset is not None:
             model_input, ground_truth = self.viz_dataset[0]
-            coords_txyc = model_input['coords_txyc'].cuda()        # Removing the batch dimension
-            wavefronts_txy = ground_truth['wavefronts_txy'].cuda() # Removing the batch dimension
+
+             # Calculate the latest x,y array of inferred slowness values across the image 
+            coords_txyc = model_input['coords_txyc'].cuda()
+            slow_vals_out, _ = self.slowness_model(coords_txyc[0,:,:,1:].reshape(-1,2)) # Skipping the first T channel
+            slow_vals_array = slow_vals_out.reshape(coords_txyc[0,:,:,0].shape).cpu().detach().numpy()
+            self.slowness_array = slow_vals_array
+
+            wavefronts_txy = ground_truth['wavefronts_txy'].cuda() 
             first_video_image_xy = ground_truth['video_txy'][0].cuda() # First batch, first image
             fig0 = train_utils.plot_waveform_tensors(self.model, coords_txyc, wavefronts_txy, first_video_image_xy)
             self.logger.experiment.add_figure(f'valchunk0/waveforms', fig0, self.current_epoch)
@@ -372,8 +378,6 @@ class WaveformNet(pl.LightningModule):    # With no gradient or wave loss, oemeg
             # Squared slowness estimate is independent of batch, so only calculate this once
             if self.wavespeed_loss_scale not in [None, 0, 0.]:
                 # Calcuate and plot the inferred squared_slowness field in x and y
-                slow_vals_out, _ = self.slowness_model(coords_txyc[0,:,:,1:].reshape(-1,2)) # Skipping the first T channel
-                slow_vals_array = slow_vals_out.reshape(coords_txyc[0,:,:,0].shape).cpu().detach().numpy()
                 img_aspect = coords_txyc.shape[2]/coords_txyc.shape[3]
                 fig2 = plt.figure(figsize=(10,5))
                 img = plt.imshow(slow_vals_array.T)
