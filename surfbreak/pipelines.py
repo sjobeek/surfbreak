@@ -31,7 +31,7 @@ def vid_to_fit_mean_flow_graph(video_file, n_samples=10, duration_s=1, processes
     return dask_graph
 
 
-def video_to_calibrated_image_tensor(video_filename, duration_s, start_s, surfspot=None, calibration_videos=None):
+def video_to_calibrated_array(video_filename, duration_s, start_s, surfspot=None, calibration_videos=None):
     """ Image tensors are 10hz by default (1/6th of the frames from a of 60Hz video)"""
     if surfspot is None and calibration_videos is None:
         filename_header = video_filename.split('/')[-1].split('_')[0]
@@ -50,17 +50,34 @@ def video_to_calibrated_image_tensor(video_filename, duration_s, start_s, surfsp
     }
     return dask_graph
     
+def video_to_trimmed_array_yxt(video_filename, duration_s, start_s, surfspot=None, calibration_videos=None):
+    """ Image tensors are 10hz by default (1/6th of the frames from a of 60Hz video)"""
+    if surfspot is None and calibration_videos is None:
+        filename_header = video_filename.split('/')[-1].split('_')[0]
+        if filename_header in SURFSPOT_CALIBRATION_VIDEOS.keys():
+            surfspot = filename_header
+        else:
+            raise ValueError('surfspot cannot be inferred from filename,'
+                             'and both `surfspot` and `calibration_videos` are unspecified.\n'
+                             'Please specify surfspot present in pipelines.SURFSPOT_CALIBRATION_VIDEOS.')
+    if calibration_videos is None:
+        calibration_videos = SURFSPOT_CALIBRATION_VIDEOS[surfspot]
+    
+    dask_graph = {
+        'calibration_ranges': (transform.run_surfzone_detection, calibration_videos),
+        'result': (transform.video_file_to_trimmed_image_xyt, video_filename, 'calibration_ranges', duration_s, start_s)
+    }
+    return dask_graph
 
 def video_to_waveform_slice(video_filename, duration_s, start_s, surfspot=None, calibration_videos=None, 
                             slice_xrange=(30,50), output_dim=2):
     """ Image tensors are 10hz by default (1/6th of the frames from a of 60Hz video)"""
-    dask_graph = video_to_calibrated_image_tensor(video_filename, duration_s, start_s, 
+    dask_graph = video_to_calibrated_array(video_filename, duration_s, start_s, 
                                                   surfspot=surfspot, calibration_videos=calibration_videos)
     dask_graph['image_tensor'] = dask_graph['result']
     dask_graph['clipped_image_tensor'] = (supervision.vertical_waveform_slice,'image_tensor', slice_xrange, output_dim)
     dask_graph['result'] = (supervision.generate_waveform_slice, 'image_tensor', slice_xrange, output_dim)
     return dask_graph
-
 
 def video_to_waveform_tensor(video_filename, ydim_out, slice_xrange=(30,90),
                              start_s=0, duration_s=30, time_axis_scale=0.5, 
@@ -104,24 +121,7 @@ def wavedetection_cnn_training(training_video):
     }
     return dask_graph
 
-def video_to_trimmed_array_yxt(video_filename, duration_s, start_s, surfspot=None, calibration_videos=None):
-    """ Image tensors are 10hz by default (1/6th of the frames from a of 60Hz video)"""
-    if surfspot is None and calibration_videos is None:
-        filename_header = video_filename.split('/')[-1].split('_')[0]
-        if filename_header in SURFSPOT_CALIBRATION_VIDEOS.keys():
-            surfspot = filename_header
-        else:
-            raise ValueError('surfspot cannot be inferred from filename,'
-                             'and both `surfspot` and `calibration_videos` are unspecified.\n'
-                             'Please specify surfspot present in pipelines.SURFSPOT_CALIBRATION_VIDEOS.')
-    if calibration_videos is None:
-        calibration_videos = SURFSPOT_CALIBRATION_VIDEOS[surfspot]
-    
-    dask_graph = {
-        'calibration_ranges': (transform.run_surfzone_detection, calibration_videos),
-        'result': (transform.video_file_to_trimmed_image_xyt, video_filename, 'calibration_ranges', duration_s, start_s)
-    }
-    return dask_graph
+
 
 
 def video_to_waveform_array_txy(video_filename, ydim_out, slice_xrange=None, calibrate=False,
@@ -132,7 +132,7 @@ def video_to_waveform_array_txy(video_filename, ydim_out, slice_xrange=None, cal
     # (pre-processing with delta-time result 2 less samples)
     """ Image tensors are 10hz by default (1/6th of the frames from a of 60Hz video)"""
     if calibrate:
-        dask_graph = video_to_calibrated_image_tensor(video_filename, duration_s+1, start_s, 
+        dask_graph = video_to_calibrated_array(video_filename, duration_s+1, start_s, 
                                                     surfspot=surfspot, calibration_videos=calibration_videos)
     else:
         dask_graph = video_to_trimmed_array_yxt(video_filename, duration_s+1, start_s, 

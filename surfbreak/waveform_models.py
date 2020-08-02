@@ -17,80 +17,10 @@ import optuna
 from optuna.integration import PyTorchLightningPruningCallback
 
 from surfbreak.loss_functions import wave_pml 
-from surfbreak.datasets import (InferredWavefrontDatasetTXYC, WavefrontDatasetTXYC)
+from surfbreak.datasets import WavefrontDatasetTXYC, WavefrontCNNDatasetCXY
 from surfbreak import base_models, diff_operators
 
 from surfbreak.loss_functions import wave_pml_2
-
-class LitWaveCNN(pl.LightningModule): 
-    def __init__(self, video_filepath, learning_rate=1e-4, wf_model_checkpoint=None, ydim=128,
-                 train_dataset=None, val_dataset=None, batch_size=8,
-                 timerange=(0,30), val_timerange=(30,40), chunk_duration=1, chunk_stride=1, n_input_channels=2):
-        """"""
-        super().__init__()
-        self.save_hyperparameters('video_filepath', 'learning_rate', 'timerange', 'chunk_duration')
-        self.model = base_models.WaveUnet(n_class=1, n_input_channels=n_input_channels)
-       
-        self.video_filepath = video_filepath
-        self.learning_rate=learning_rate
-        self.timerange=timerange
-        self.val_timerange=val_timerange
-        self.chunk_duration=chunk_duration
-        self.chunk_stride=chunk_stride
-        self.ydim = ydim
-        self.n_input_channels=n_input_channels
-        self.wf_model_checkpoint = wf_model_checkpoint
-        self.train_dataset=train_dataset
-        self.val_dataset=val_dataset
-        self.batch_size=batch_size
-        
-        self.example_input_array = torch.ones(1,n_input_channels,128,256)
-
-    def forward(self, data):
-        return self.model(data)
-
-    def training_step(self, batch, batch_nb):
-        model_input, ground_truth = batch
-        wf_values_out = self.model(model_input)
-        mse_loss = F.mse_loss(wf_values_out, ground_truth)
-        # Gentle pressure to have mean-zero across entire image
-        zeromean_loss = wf_values_out.mean()**2 * 0.01
-        loss = mse_loss + zeromean_loss
-
-        tensorboard_logs = {'train/loss':loss,
-                            'train/mse_loss': mse_loss,
-                            'train/avg_loss': zeromean_loss}
-        return {'loss': loss, 'log': tensorboard_logs}
-
-    def validation_step(self, batch, batch_nb):
-        model_input, ground_truth = batch
-        model_output = self.model(model_input)
-        loss = F.mse_loss(model_output, ground_truth)
-        return {'val_loss':loss}
-
-    def validation_epoch_end(self, outputs):
-        avg_loss = sum(x["val_loss"] for x in outputs) / len(outputs)
-        tensorboard_logs = {'val/avg_loss': avg_loss}
-        return {"val_loss": avg_loss, "log":tensorboard_logs}
-
-    def configure_optimizers(self):
-        return Adam(self.model.parameters(), lr=self.learning_rate)
-    
-    def setup(self, stage):
-        if self.train_dataset is None:
-            self.train_wfs_dataset = WavefrontSupervisionDataset(self.video_filepath, ydim=self.ydim, timerange=self.timerange,
-                                                                time_chunk_duration_s=self.chunk_duration, time_chunk_stride_s=self.chunk_stride)
-            self.train_dataset = MaskedCNNWavefrontDataset(self.train_wfs_dataset)
-        if self.val_dataset is None:
-            self.val_wfs_dataset = WavefrontSupervisionDataset(self.video_filepath, ydim=self.ydim, timerange=self.val_timerange,
-                                                                time_chunk_duration_s=self.chunk_duration, time_chunk_stride_s=self.chunk_stride)
-            self.val_dataset = MaskedCNNWavefrontDataset(self.val_wfs_dataset)
-
-    def train_dataloader(self):
-        return torch.utils.data.DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=True, num_workers=4)
-
-    def val_dataloader(self):
-        return torch.utils.data.DataLoader(self.val_dataset, batch_size=self.batch_size, shuffle=False, num_workers=4)
 
 
 class WaveformNet(pl.LightningModule):    # With no gradient or wave loss, oemega values of (1, 5) work well (best at epochs 3~5)  
@@ -133,6 +63,7 @@ class WaveformNet(pl.LightningModule):    # With no gradient or wave loss, oemeg
         self.video_filepath = video_filepath
         self.batch_size = batch_size
         self.inferred_slowness=None
+        self.val_fig=None
 
         self.example_input_array = torch.ones(1,1337,3)
 
@@ -205,6 +136,7 @@ class WaveformNet(pl.LightningModule):    # With no gradient or wave loss, oemeg
             first_video_image_xy = ground_truth['video_txy'][0].cuda() # First batch, first image
             fig0 = train_utils.plot_waveform_tensors(self.model, coords_txyc, wavefronts_txy, first_video_image_xy)
             self.logger.experiment.add_figure(f'valchunk0/waveforms', fig0, self.current_epoch)
+            self.val_fig = fig0
 
             # Squared slowness estimate is independent of batch, so only calculate this once
             if self.wavespeed_loss_scale not in [None, 0, 0.]:
@@ -247,3 +179,75 @@ class WaveformNet(pl.LightningModule):    # With no gradient or wave loss, oemeg
 
     def val_dataloader(self):
         return torch.utils.data.DataLoader(self.wf_valid_dataset, batch_size=self.batch_size, shuffle=False, num_workers=4)
+
+
+
+class LitWaveCNN(pl.LightningModule): 
+    def __init__(self, video_filepath, learning_rate=1e-4, wf_model_checkpoint=None, ydim=128,
+                 train_dataset=None, val_dataset=None, batch_size=8,
+                 timerange=(0,30), val_timerange=(30,40), chunk_duration=1, chunk_stride=1, n_input_channels=2):
+        """"""
+        super().__init__()
+        self.save_hyperparameters('video_filepath', 'learning_rate', 'timerange', 'chunk_duration')
+        self.model = base_models.WaveUnet(n_class=1, n_input_channels=n_input_channels)
+       
+        self.video_filepath = video_filepath
+        self.learning_rate=learning_rate
+        self.timerange=timerange
+        self.val_timerange=val_timerange
+        self.chunk_duration=chunk_duration
+        self.chunk_stride=chunk_stride
+        self.ydim = ydim
+        self.n_input_channels=n_input_channels
+        self.wf_model_checkpoint = wf_model_checkpoint
+        self.train_dataset=train_dataset
+        self.val_dataset=val_dataset
+        self.batch_size=batch_size
+        
+        self.example_input_array = torch.ones(1,n_input_channels,128,256)
+
+    def forward(self, data):
+        return self.model(data)
+
+    def training_step(self, batch, batch_nb):
+        model_input, ground_truth = batch
+        wf_values_out = self.model(model_input)
+        mse_loss = F.mse_loss(wf_values_out, ground_truth)
+        # Gentle pressure to have mean-zero across entire image
+        zeromean_loss = wf_values_out.mean()**2 * 0.01
+        loss = mse_loss + zeromean_loss
+
+        tensorboard_logs = {'train/loss':loss,
+                            'train/mse_loss': mse_loss,
+                            'train/avg_loss': zeromean_loss}
+        return {'loss': loss, 'log': tensorboard_logs}
+
+    def validation_step(self, batch, batch_nb):
+        model_input, ground_truth = batch
+        model_output = self.model(model_input)
+        loss = F.mse_loss(model_output, ground_truth)
+        return {'val_loss':loss}
+
+    def validation_epoch_end(self, outputs):
+        avg_loss = sum(x["val_loss"] for x in outputs) / len(outputs)
+        tensorboard_logs = {'val/avg_loss': avg_loss}
+        return {"val_loss": avg_loss, "log":tensorboard_logs}
+
+    def configure_optimizers(self):
+        return Adam(self.model.parameters(), lr=self.learning_rate)
+    
+    def setup(self, stage):
+        if self.train_dataset is None:
+            self.train_wfs_dataset = WavefrontDatasetTXYC(self.video_filepath, ydim=self.ydim, timerange=self.timerange,
+                                                                time_chunk_duration_s=self.chunk_duration, time_chunk_stride_s=self.chunk_stride)
+            self.train_dataset = WavefrontCNNDatasetCXY(self.train_wfs_dataset)
+        if self.val_dataset is None:
+            self.val_wfs_dataset = WavefrontDatasetTXYC(self.video_filepath, ydim=self.ydim, timerange=self.val_timerange,
+                                                                time_chunk_duration_s=self.chunk_duration, time_chunk_stride_s=self.chunk_stride)
+            self.val_dataset = WavefrontCNNDatasetCXY(self.val_wfs_dataset)
+
+    def train_dataloader(self):
+        return torch.utils.data.DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=True, num_workers=4)
+
+    def val_dataloader(self):
+        return torch.utils.data.DataLoader(self.val_dataset, batch_size=self.batch_size, shuffle=False, num_workers=4)

@@ -211,65 +211,11 @@ class WavefrontDatasetTXYC(Dataset):
             "wavefront_loss_mask": torch.as_tensor(self.std_wavefront_xy > self.std_wavefront_xy.mean(), dtype=torch.bool)
         }
 
-       
-
         return model_input, ground_truth
 
-class InferredWavefrontDatasetTXYC(Dataset):
-    def __init__(self, wfs_dataset, wavecnn_ckpt):
-        """Takes a WavefrontSupervisionDataset, and wrapts it with a pre-trained CNN to infer the wavefront"""
-        super().__init__()
-        from surfbreak.waveform_models import LitWaveCNN
-        self.wfs_dataset = wfs_dataset
-        self.wavecnn_ckpt = wavecnn_ckpt
-        self.wavecnn_model = LitWaveCNN.load_from_checkpoint(wavecnn_ckpt).cuda()
-        
-    def get_wf_stats(self):
-        # Accumulate statistics for the wavefront images (mean and standard deviation)
-        firstout, firstgt = self[0]
-        acc_avg_wf_img = torch.zeros_like(firstgt['wavefronts_txy'].mean(axis=0))
-        acc_std_wf_img = torch.zeros_like(firstgt['wavefronts_txy'])
-        for model_in, model_gt in self:
-            acc_avg_wf_img += model_gt['wavefronts_txy'].mean(axis=0)
-            acc_std_wf_img = np.concatenate((acc_std_wf_img, model_gt['wavefronts_txy']), axis=0)
-        avg_cnnwf_xy = acc_avg_wf_img / len(self)
-        std_cnnwf_xy = acc_std_wf_img.std(axis=0)
-        return avg_cnnwf_xy, std_cnnwf_xy
-        
-    def __len__(self):
-        return len(self.wfs_dataset)
-
-    def __getitem__(self, idx):
-
-        wfs_input, wfs_gt = self.wfs_dataset[idx]
-        vid_tensor_txy = wfs_gt["video_txy"]
-        wf_tensor_txy = wfs_gt["wavefronts_txy"]
-        
-        wavecnn_input_tcxy = torch.stack((vid_tensor_txy, wf_tensor_txy), dim=0).permute(1,0,2,3)            
-        assert wavecnn_input_tcxy.shape[0] == vid_tensor_txy.shape[0] # Ensure length of time dimension is identical
-
-        # Process the input video tensors one timestep at a time on the GPU, to avoid using too much memory
-        frames_out = []
-        for t in range(wavecnn_input_tcxy.shape[0]):
-            this_wavecnn_input = wavecnn_input_tcxy[t].cuda()[None,...]
-            frames_out.append(self.wavecnn_model(this_wavecnn_input)[:,0].detach().cpu()) # Remove the empty second channel dimension
-        wavecnn_label = torch.cat(frames_out, dim=0)
-
-        assert vid_tensor_txy.shape == wavecnn_label.shape
-
-        # Inherit 'coords_txyc' from WavefrontSupervisionDataset
-        model_input = wfs_input
-
-        # Inherit 'video_txy', 'timerange', and 'wavefront_loss_mask' 
-        ground_truth = wfs_gt
-        ground_truth["wavefronts_txy"] = wavecnn_label
-
-        return model_input, ground_truth
-
-
-class MaskedCNNTrainingBatchesNC(Dataset):
+class WavefrontCNNDatasetCXY(Dataset):
     def __init__(self, wf_supervision_dataset):
-        """Subsamples a (t,x,y,c) WaveformSupervisionDataset into individual (n,c) masked batches that can fit in memory"""
+        """Creates training data for the CNN-based wavefront inference"""
         self.wf_supervision_dataset = wf_supervision_dataset
         _, ground_truth = self.wf_supervision_dataset[0]
                                     # One less timestep per segment due to use of time-delta
