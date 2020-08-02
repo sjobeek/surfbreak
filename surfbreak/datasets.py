@@ -1,8 +1,5 @@
 # Reference tests: 08_training_datasets.ipynb (unless otherwise specified).
 
-__all__ = ['normalize_tensor', 'get_wavefront_tensor_txy', 'get_mgrid', 'WaveformVideoDataset',
-           'subsample_strided_buckets', 'WaveformChunkDataset']
-
 # Cell
 from surfbreak import graphutils, supervision
 from surfbreak import pipelines
@@ -45,19 +42,6 @@ def raw_wavefront_array_to_normalized_txy(wavefront_array, ydim_out, duration_s=
     return resized_tensor[0,0,...].numpy()
 
 
-def get_wavefront_tensor_txy(video_filepath, ydim_out, slice_xrange=(30,90), output_dim=3, start_s=0, duration_s=30, time_axis_scale=0.5,
-                             target_graph_key="result"):
-    """Supplying target_traph_key='clipped_image_tensor' will give an equivalently scaled version of the raw video instead """
-
-    waveform_slice_graph = pipelines.video_to_waveform_tensor(video_filepath, ydim_out=ydim_out,
-                                                                duration_s=duration_s, start_s=start_s,
-                                                                slice_xrange=slice_xrange, output_dim=output_dim,
-                                                                time_axis_scale=time_axis_scale)
-    
-    return torch.from_numpy(graphchain.get(waveform_slice_graph, target_graph_key))
-
-
-# Cell
 def get_mgrid(sidelen_tuple, tcoord_range=None):
     '''Generates a flattened grid of (t,x,y) coordinates in a range of -1 to 1.
     sidelen_tuple: tuple of coordinate side lengths (t,x,y)
@@ -74,169 +58,6 @@ def get_mgrid(sidelen_tuple, tcoord_range=None):
     mgrid = torch.stack(torch.meshgrid(*tensors), dim=-1)
     mgrid = mgrid.reshape(-1, len(sidelen_tuple))
     return mgrid
-
-
-class WaveformVideoDataset(Dataset):
-    def __init__(self, video_filepath, ydim, xrange=(30,90), timerange=(0,61), time_chunk_duration_s=30, time_chunk_stride_s=15, time_axis_scale=0.5):
-        super().__init__()
-        start_s, end_s = timerange
-        self.video_filepath = video_filepath
-        self.ydim = ydim
-        self.xrange = xrange
-        self.time_axis_scale = time_axis_scale
-        self.time_chunk_duration_s = time_chunk_duration_s
-        self.time_chunk_stride_s = time_chunk_stride_s
-        self.t_coords_per_second = 10 * time_axis_scale
-
-        self.video_chunk_timeranges = np.array(list((start, start+time_chunk_duration_s) for start in
-                                                    range(start_s, end_s + 1 - time_chunk_duration_s, time_chunk_stride_s)))
-        self.cached_chunk_data = None
-        self.cached_chunk_idx = None
-        
-    def __len__(self):
-        return len(self.video_chunk_timeranges)
-
-    def __getitem__(self, idx):
-        if idx != self.cached_chunk_idx:
-            item_start_s, item_end_s = self.video_chunk_timeranges[idx]
-            full_wf_tensor = get_wavefront_tensor_txy(self.video_filepath, self.ydim, slice_xrange=self.xrange, output_dim=3,
-                                                start_s=item_start_s, duration_s=(item_end_s - item_start_s),
-                                                time_axis_scale=self.time_axis_scale, target_graph_key="result")
-            full_vid_tensor = get_wavefront_tensor_txy(self.video_filepath, self.ydim, slice_xrange=self.xrange, output_dim=3,
-                                                start_s=item_start_s, duration_s=(item_end_s - item_start_s),
-                                                time_axis_scale=self.time_axis_scale, target_graph_key="scaled_video_tensor")
-            # For now, abstract time coordinates will be in centered minutes (so a 2 minute video spans -1 to 1, and a 30 minute video spans -15 to 15)
-            full_duration_s = self.video_chunk_timeranges.max() - self.video_chunk_timeranges.min()
-            full_tcoord_range = -((full_duration_s/60) / 2), ((full_duration_s/60) / 2)
-
-            this_chunk_tcoord_range = [self.video_chunk_timeranges[idx][0]/60 - full_tcoord_range[1],
-                                    self.video_chunk_timeranges[idx][1]/60 - full_tcoord_range[1]]
-
-            all_coords = get_mgrid(full_wf_tensor.shape, tcoord_range=this_chunk_tcoord_range)
-
-            model_input = {
-                'coords_txyc':all_coords.reshape(*full_vid_tensor.shape,3)
-            }
-
-            assert full_vid_tensor.shape == full_wf_tensor.shape
-            ground_truth = {
-                "video_txy": full_vid_tensor,
-                "wavefronts_txy": full_wf_tensor,
-                "timerange": (item_start_s, item_end_s),
-
-            }
-            self.cached_chunk_idx = idx
-            self.cached_chunk_data = (model_input, ground_truth)
-        else:
-            model_input, ground_truth = self.cached_chunk_data
-            
-        return model_input, ground_truth
-
-
-# Cell
-def subsample_strided_buckets(txyc_tensor, bucket_sidelength, samples_per_bucket=100,
-                              return_xy_buckets=False, sample_offset=0, filter_std_below=0.2):
-    """Samples channel values form yxt tensors along bucketed spatial (x,y) dimensions.
-       Leaves the time dimension the same. Return a tensor of dimensions (time, channel, buckets, samples)
-       Input:  tensor (time, x, y, channels)
-       Output: tensor (bucket, samples, time, channels)
-               OR (x,y,s,t,c) if return_xy_buckets=True
-
-       Only samples from the first element in the batch
-       if return_xy_buckets=True, buckets are indexed by x and ycoordinates"""
-
-    tcxy_tensor = txyc_tensor.permute(0,3,1,2)
-    tdim, cdim, xdim, ydim = tcxy_tensor.shape
-    stride = bucket_sidelength
-
-    # Fold: Expands a rolling window of kernel_size, with overlap between windows if stride < kernel_size
-    #       input tensor of shape (N,C,T) , where N is the batch dimension, C is the channel dimension,
-    #       and * represent arbitrary spatial dimensions
-    #          See https://pytorch.org/docs/master/generated/torch.nn.Unfold.html#torch.nn.Unfold
-    uf = F.unfold(tcxy_tensor,kernel_size=bucket_sidelength, stride=stride)
-    n_buckets = uf.shape[-1]
-    tcsb = uf.reshape(tdim, cdim, -1, n_buckets)
-    n_total_samples = tcsb.shape[2]
-
-    subsample_stride = n_total_samples//samples_per_bucket
-    offset_idx = sample_offset%subsample_stride
-    tcsb_sampled = tcsb[...,:offset_idx + samples_per_bucket*subsample_stride:subsample_stride,:]
-
-    if return_xy_buckets:
-        tcsxy = tcsb_sampled.reshape(tdim, cdim, tcsb_sampled.shape[2], xdim//stride, ydim//stride)
-        xystc = tcsxy.permute(3,4,2,0,1)
-        return xystc
-    else:
-        bstc = tcsb_sampled.permute(3,2,0,1)
-        return bstc
-
-class WaveformChunkDataset(Dataset):
-    def __init__(self, wf_video_dataset, video_index=None, xy_bucket_sidelen=10, samples_per_xy_bucket=10, time_sample_interval=4,
-                 steps_per_video_chunk=1000, bucket_mask_minstd=0.2, sample_fraction=1.0):
-        self.wf_video_dataset = wf_video_dataset
-        self.video_index = video_index
-        self.xy_bucket_sidelen = xy_bucket_sidelen
-        self.samples_per_xy_bucket = samples_per_xy_bucket
-        self.time_sample_interval = time_sample_interval
-        self.steps_per_video_chunk = steps_per_video_chunk
-        self.bucket_mask_minstd = bucket_mask_minstd
-        self.sample_fraction = sample_fraction
-    
-    def __len__(self):
-        return len(self.wf_video_dataset) * self.steps_per_video_chunk
-
-    def __getitem__(self, idx):
-        if self.sample_fraction < 0.9999:
-            # Get a single index
-            idx = torch.randint(low=0, high=int(len(self.wf_video_dataset) * self.steps_per_video_chunk * self.sample_fraction), size=(1,))
-
-        if self.video_index is None:
-            video_idx = int(idx // self.steps_per_video_chunk)
-        else:
-            video_idx = self.video_index
-        t_idx = idx % self.steps_per_video_chunk
-        
-        model_input, ground_truth = self.wf_video_dataset[video_idx] 
-
-        all_wf_values_txyc = ground_truth['wavefronts_txy'][..., None]
-        all_coords_txyc = model_input['coords_txyc']
-
-        xy_subsampled_wf_values_bstc = subsample_strided_buckets(all_wf_values_txyc,
-                                                                 bucket_sidelength=self.xy_bucket_sidelen,
-                                                                 samples_per_bucket=self.samples_per_xy_bucket,
-                                                                 sample_offset=t_idx)
-        xy_subsampled_coords_bstc =    subsample_strided_buckets(all_coords_txyc,
-                                                                 bucket_sidelength=self.xy_bucket_sidelen,
-                                                                 samples_per_bucket=self.samples_per_xy_bucket,
-                                                                 sample_offset=t_idx)
-
-        ti = self.time_sample_interval
-
-        subsampled_wf_values_bstc = xy_subsampled_wf_values_bstc[:,:,t_idx%ti::ti,:]
-        subsampled_coords_bstc =       xy_subsampled_coords_bstc[:,:,t_idx%ti::ti,:]
-
-        # Filters out buckets with low standard deviation (probably just background ocean pixels - NOT waves)
-        n_buckets = subsampled_wf_values_bstc.shape[0]
-        bucket_mask = subsampled_wf_values_bstc.reshape(n_buckets,-1).std(dim=1) > self.bucket_mask_minstd
-
-        model_input = {
-            'coords': subsampled_coords_bstc.reshape(-1, 3),
-            'masked_coords': subsampled_coords_bstc[bucket_mask].reshape(-1, 3)
-        }
-
-        assert subsampled_wf_values_bstc.shape[:3] == subsampled_coords_bstc.shape[:3]
-
-        ground_truth = {
-            "wavefront_values": subsampled_wf_values_bstc.reshape(-1,1),
-            "masked_wf_values": subsampled_wf_values_bstc[bucket_mask].reshape(-1,1),
-            "bst_shape": subsampled_wf_values_bstc.shape[:3],
-            "masked_bst_shape": subsampled_wf_values_bstc[bucket_mask].shape[:3],
-            "timerange": ground_truth['timerange'],
-            'time_sampling_offset': t_idx%ti
-
-        }
-
-        return model_input, ground_truth
 
 
 import pickle
@@ -276,52 +97,11 @@ def cache_video_dataset_as_inferred_xy_images(video_dataset, model, tmpdir='./tm
 
 
 from surfbreak.train_utils import slugify
-
-class InferredWaveformDataset(Dataset):
-    def __init__(self, video_filepath, trained_waveform_model, ydim, xrange=(30,90), timerange=(0,61), time_chunk_duration_s=30, time_chunk_stride_s=15, time_axis_scale=0.5,
-                 tmpdir='./tmp/dataset_cache'):
-        super().__init__()
-        start_s, end_s = timerange
-        self.video_filepath = video_filepath
-        self.ydim = ydim
-        self.xrange = xrange
-        self.time_axis_scale = time_axis_scale
-        self.time_chunk_duration_s = time_chunk_duration_s
-        self.time_chunk_stride_s = time_chunk_stride_s
-        self.t_coords_per_second = 10 * time_axis_scale
-        self.tmpdir=tmpdir
-        self.waveform_model = trained_waveform_model
-        
-        self.wf_train_video_dataset = WaveformVideoDataset(video_filepath, ydim=ydim, xrange=xrange, timerange=timerange, time_chunk_duration_s=time_chunk_duration_s, 
-                                                           time_chunk_stride_s=time_chunk_stride_s, time_axis_scale=time_axis_scale)
-        
-        self.fname_pairs = cache_video_dataset_as_inferred_xy_images(self.wf_train_video_dataset, self.waveform_model, tmpdir=self.tmpdir)        
-        
-    def __len__(self):
-        return len(self.fname_pairs)
-
-    def __getitem__(self, idx):
-        vid_fname, wf_fname = self.fname_pairs[idx]
-        with open(os.path.join(self.tmpdir, vid_fname), 'rb') as f:
-            model_input_cxy = torch.from_numpy(pickle.load(f)) # Input has a channel dimension already
-        with open(os.path.join(self.tmpdir, wf_fname), 'rb') as f:
-            ground_truth_cxy = torch.from_numpy(pickle.load(f))[None,...] # Add empty channel dimension for now
-        assert model_input_cxy.shape[1:] == ground_truth_cxy.shape[1:]
- 
-        return (trim_img_to_nearest_multiple(model_input_cxy,  divisor=4), # Must be divisible by 4 - just crop for now.
-                trim_img_to_nearest_multiple(ground_truth_cxy, divisor=4))  # video_image_xy, inferred_waveform_xy
     
 def trim_img_to_nearest_multiple(tensor, divisor=4):
     max_xdim = tensor.shape[-2] - tensor.shape[-2]%divisor  # Must be divisible by 4 - just crop for now. 
     max_ydim = tensor.shape[-1] - tensor.shape[-1]%divisor  # Must be divisible by 4 - just crop for now. 
     return tensor[..., :max_xdim,:max_ydim]
-
-def detect_wavefronts(wf_cnn_checkpoint, video_tensor):
-    wavecnn_model = LitWaveCNN.load_from_checkpoint(wf_cnn_checkpoint)
-    # Append the second channel with time-delta intensity
-    input_img_array_tcxy = np.concatenate((video_tensor[:-1][None,...], 
-                                          video_tensor[1:][None,...] - video_tensor[:-1][None,...]), axis=0).transpose(1,0,2,3)
-    return wavecnn_model(torch.from_numpy(input_img_array_tcxy))
 
 def get_trimmed_tensor(wf_labeling_training_video, graph_key='trimmed_wavefront_array', calibrate=True,
                        start_s=5, duration_s=1.2, time_axis_scale=0.5, ydim_out=128, xdim_max=None):
@@ -336,9 +116,9 @@ def get_trimmed_tensor(wf_labeling_training_video, graph_key='trimmed_wavefront_
 
 from surfbreak.supervision import wavefront_diff_tensor
 
-class WavefrontSupervisionDataset(Dataset):
+class WavefrontDatasetTXYC(Dataset):
     def __init__(self, video_filepath, ydim=128, timerange=(0,60), time_chunk_duration_s=2, time_chunk_stride_s=2, time_axis_scale=0.5,
-                 max_width=None, calibrate_h=True):
+                 max_width=None, calibrate_h=True, wavecnn_ckpt=None):
         super().__init__()
         from surfbreak.waveform_models import LitWaveCNN
         self.video_filepath = video_filepath
@@ -351,6 +131,11 @@ class WavefrontSupervisionDataset(Dataset):
         self.average_wavefront_xy = torch.zeros(1)
         self.std_wavefront_xy = torch.zeros(1)
         self.calibrate_h=calibrate_h
+        self.wavecnn_ckpt = wavecnn_ckpt
+        if wavecnn_ckpt is None:
+            self.wavecnn_model = None
+        else:        
+            self.wavecnn_model = LitWaveCNN.load_from_checkpoint(wavecnn_ckpt).cuda()
 
         start_s, end_s = timerange
         self.video_chunk_timeranges = np.array(list((start, start+time_chunk_duration_s) for start in
@@ -376,16 +161,16 @@ class WavefrontSupervisionDataset(Dataset):
     def __getitem__(self, idx):
         item_start_s, item_end_s = self.video_chunk_timeranges[idx]
         
-        vid_tensor_txy = get_trimmed_tensor(self.video_filepath, graph_key='trimmed_video_array', calibrate=self.calibrate_h, 
+        vid_array_txy = get_trimmed_tensor(self.video_filepath, graph_key='trimmed_video_array', calibrate=self.calibrate_h, 
                                             start_s=item_start_s, 
                                             duration_s=(item_end_s - item_start_s), # Add one extra timestep here
                                             time_axis_scale=self.time_axis_scale, ydim_out=self.ydim, xdim_max=self.max_width)
 
-        wf_tensor_txy = get_trimmed_tensor(self.video_filepath, graph_key='trimmed_wavefront_array', calibrate=self.calibrate_h, 
+        wf_array_txy = get_trimmed_tensor(self.video_filepath, graph_key='trimmed_wavefront_array', calibrate=self.calibrate_h, 
                                             start_s=item_start_s, 
                                             duration_s=(item_end_s - item_start_s), # Add one extra timestep here
                                             time_axis_scale=self.time_axis_scale, ydim_out=self.ydim, xdim_max=self.max_width)
-        wavecnn_label = normalize_tensor(wf_tensor_txy, clip_max=1)
+        wavefront_array_txy = normalize_tensor(wf_array_txy, clip_max=1)
 
         # For now, abstract time coordinates will be in centered minutes (so a 2 minute video spans -1 to 1, and a 30 minute video spans -15 to 15)
         full_duration_s = self.video_chunk_timeranges.max() - self.video_chunk_timeranges.min()
@@ -394,24 +179,43 @@ class WavefrontSupervisionDataset(Dataset):
         this_chunk_tcoord_range = [self.video_chunk_timeranges[idx][0]/60 - full_tcoord_range[1],
                                    self.video_chunk_timeranges[idx][1]/60 - full_tcoord_range[1]]
 
-        all_coords = get_mgrid(vid_tensor_txy.shape, tcoord_range=this_chunk_tcoord_range)
+        all_coords = get_mgrid(vid_array_txy.shape, tcoord_range=this_chunk_tcoord_range)
+
+     # Infer wavefronts if checkpoint available
+        if self.wavecnn_model is None:
+            wavefronts_txy = torch.from_numpy(wavefront_array_txy)
+        else:
+            wavecnn_input_tcxy = torch.stack((torch.from_numpy(vid_array_txy), 
+                                              torch.from_numpy(wavefront_array_txy)), dim=0).permute(1,0,2,3)            
+            assert wavecnn_input_tcxy.shape[0] == vid_array_txy.shape[0] # Ensure length of time dimension is identical
+            # Process the input video tensors one timestep at a time on the GPU, to avoid using too much memory
+            frames_out = []
+            for t in range(wavecnn_input_tcxy.shape[0]):
+                this_wavecnn_input = wavecnn_input_tcxy[t].cuda()[None,...]
+                frames_out.append(self.wavecnn_model(this_wavecnn_input)[:,0].detach().cpu()) # Remove the empty second channel dimension
+            wavecnn_out = torch.cat(frames_out, dim=0)
+            assert vid_array_txy.shape == wavecnn_out.shape
+
+            wavefronts_txy = wavecnn_out
 
         model_input = {
-            'coords_txyc':all_coords.reshape(*vid_tensor_txy.shape,3).clone()
+            'coords_txyc':all_coords.reshape(*vid_array_txy.shape,3).clone()
         }
 
-        assert vid_tensor_txy.shape == wavecnn_label.shape
+        assert vid_array_txy.shape == wavefront_array_txy.shape
         
         ground_truth = {
-            "video_txy": torch.tensor(vid_tensor_txy, dtype=torch.float),
-            "wavefronts_txy": torch.from_numpy(wavecnn_label),
+            "video_txy": torch.tensor(vid_array_txy, dtype=torch.float),
+            "wavefronts_txy": wavefronts_txy,
             "timerange": (item_start_s, item_end_s),
             "wavefront_loss_mask": torch.as_tensor(self.std_wavefront_xy > self.std_wavefront_xy.mean(), dtype=torch.bool)
         }
 
+       
+
         return model_input, ground_truth
 
-class InferredWavefrontDataset(Dataset):
+class InferredWavefrontDatasetTXYC(Dataset):
     def __init__(self, wfs_dataset, wavecnn_ckpt):
         """Takes a WavefrontSupervisionDataset, and wrapts it with a pre-trained CNN to infer the wavefront"""
         super().__init__()
@@ -463,8 +267,7 @@ class InferredWavefrontDataset(Dataset):
         return model_input, ground_truth
 
 
-
-class MaskedCNNWavefrontDataset(Dataset):
+class MaskedCNNTrainingBatchesNC(Dataset):
     def __init__(self, wf_supervision_dataset):
         """Subsamples a (t,x,y,c) WaveformSupervisionDataset into individual (n,c) masked batches that can fit in memory"""
         self.wf_supervision_dataset = wf_supervision_dataset
@@ -488,8 +291,7 @@ class MaskedCNNWavefrontDataset(Dataset):
         return trim_img_to_nearest_multiple(cnn_input_cxy), trim_img_to_nearest_multiple(masked_waveform)
         
 
-
-class MaskedWavefrontDataset(Dataset):
+class MaskedWavefrontBatchesNC(Dataset):
     def __init__(self, wf_supervision_dataset, samples_per_batch=1000, included_time_fraction=1.0, resample_fraction=True):
         """Subsamples a (t,x,y,c) WaveformSupervisionDataset into individual (n,c) masked batches that can fit in memory"""
         self.wf_supervision_dataset = wf_supervision_dataset
