@@ -282,7 +282,6 @@ class MaskedWavefrontBatchesNC(Dataset):
         subsampled_wf_values_sc = masked_wf_values_nc[batch_idx::self.total_values_per_masked_image//self.samples_per_batch,:][:self.samples_per_batch]
         subsampled_coords_sc =       masked_coords_nc[batch_idx::self.total_values_per_masked_image//self.samples_per_batch,:][:self.samples_per_batch]
 
-        # TODO: Add in a small, uniformly-sampled group of coordinates, with corresponding zero-valued waveforms (as regularization)
 
         model_input = {
             #'coords_xyc': coords_xyc,

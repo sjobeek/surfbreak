@@ -37,7 +37,8 @@ class WaveformNet(pl.LightningModule):    # With no gradient or wave loss, oemeg
         if video_filepath is None:
             assert train_dataset is not None and valid_dataset is not None, "Either a video_filepath or datasets must be provided."
         self.save_hyperparameters('first_omega_0', 'hidden_omega_0', 'squared_slowness', 'wavefunc_loss_scale', 'wavespeed_loss_scale',
-                                  'hidden_features', 'hidden_layers', 'learning_rate' )
+                                  'hidden_features', 'hidden_layers', 'learning_rate', 'batch_size',
+                                  'wavespeed_first_omega_0', 'wavespeed_hidden_omega_0')
         self.model = base_models.Siren(in_features=3, 
                                  out_features=1, 
                                  hidden_features=hidden_features,
@@ -70,14 +71,14 @@ class WaveformNet(pl.LightningModule):    # With no gradient or wave loss, oemeg
     def forward(self, data):
         return self.model(data)
 
-    def training_step(self, batch, batch_nb):
+    def training_step(self, batch, batch_nb, optimizer_idx):
         model_input, ground_truth = batch
         wf_values_out, coords_out = self.model(model_input['coords_sc'])
         
         ## Calculate the basic mean squared error loss using the training data
         mse_loss = F.mse_loss(wf_values_out, ground_truth['wavefront_values_sc'])
-        # TODO: Devise method to normalize unsampled regions to have zero average amplitude
-        avg_loss = (wf_values_out**2).mean() * 1e-6 # Gentle pressure to have zero amplitude across entire video.
+        # Enforce zero mean amplitude at each time (=each batch), not just over the entire x,y,t video cube!
+        avg_loss = (wf_values_out**2).mean(dim=1).sum() * 1e-6 # Gentle pressure to have zero amplitude at each timestep.
         tensorboard_logs = {'train/mse_loss':mse_loss,
                             'train/avg_loss':avg_loss}
 
@@ -103,12 +104,14 @@ class WaveformNet(pl.LightningModule):    # With no gradient or wave loss, oemeg
         wavefunc_loss = wave_loss_dict['diff_constraint_hom']*self.wavefunc_loss_scale # * min(1, (step/ total_steps)**2)
         tensorboard_logs['train/wavefunc_loss'] = wavefunc_loss
 
-        train_loss = mse_loss + avg_loss + wavefunc_loss + wavespeed_loss
+        if optimizer_idx==0:
+            train_loss = mse_loss + avg_loss + wavefunc_loss
+            tensorboard_logs['train/loss'] = train_loss
+            tensorboard_logs['train/included_time_fraction'] = self.wf_train_dataset.included_time_fraction 
+            return {'loss': train_loss, 'log': tensorboard_logs}
+        else:
+            return {'loss': wavefunc_loss + wavespeed_loss}
 
-        tensorboard_logs['train/loss'] = train_loss
-        tensorboard_logs['train/included_time_fraction'] = self.wf_train_dataset.included_time_fraction 
-
-        return {'loss': train_loss, 'log': tensorboard_logs}
 
     def validation_step(self, batch, batch_nb):
         model_input, ground_truth = batch
@@ -162,7 +165,9 @@ class WaveformNet(pl.LightningModule):    # With no gradient or wave loss, oemeg
 
     def configure_optimizers(self):
         if self.wavespeed_loss_scale not in [None, 0, 0.]:
-            return Adam(itertools.chain(self.model.parameters(), self.slowness_model.parameters()), lr=self.learning_rate)
+            waveform_model_opt = Adam(self.model.parameters(),          lr=self.learning_rate)
+            slowness_model_opt = Adam(self.slowness_model.parameters(), lr=self.learning_rate*0.1)
+            return [waveform_model_opt, slowness_model_opt]
         else:
             return Adam(self.model.parameters(), lr=self.learning_rate)
     
@@ -175,10 +180,10 @@ class WaveformNet(pl.LightningModule):    # With no gradient or wave loss, oemeg
 
     def train_dataloader(self):
                                            # Shuffling is handled by the chunk_dataset when sample_fraction < 1.0
-        return torch.utils.data.DataLoader(self.wf_train_dataset, batch_size=self.batch_size, shuffle=True, num_workers=4)
+        return torch.utils.data.DataLoader(self.wf_train_dataset, batch_size=self.batch_size, shuffle=True, num_workers=6)
 
     def val_dataloader(self):
-        return torch.utils.data.DataLoader(self.wf_valid_dataset, batch_size=self.batch_size, shuffle=False, num_workers=4)
+        return torch.utils.data.DataLoader(self.wf_valid_dataset, batch_size=self.batch_size, shuffle=False, num_workers=6)
 
 
 
