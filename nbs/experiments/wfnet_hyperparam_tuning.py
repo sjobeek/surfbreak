@@ -11,7 +11,7 @@ os.chdir('/home/erik/work/surfbreak/nbs')
 
 # NOTE! Change this environment variable during each optimization experiemnt to group them properly on wandb
 EXPERIMENT_NAME = "test4"
-os.environ["WANDB_RUN_GROUP"] = EXPERIMENT_NAME"
+os.environ["WANDB_RUN_GROUP"] = EXPERIMENT_NAME
 
 LOGDIR = 'wandb'
 MODELDIR = os.path.join(LOGDIR, 'opt_models')
@@ -20,7 +20,7 @@ def objective(trial):
     checkpoint_callback = pl.callbacks.ModelCheckpoint( # Filenames for each trial must be made unique
         os.path.join(MODELDIR, "trial_{}".format(trial.number), "{epoch}"), monitor="val_loss")
 
-    wandb_logger = pl.loggers.wandb.WandbLogger(name=f"{EXPERIMENT_NAME}/wfnet_opt_{trial.number}", save_dir=LOGDIR, project='surfbreak', log_model=True)
+    wandb_logger = pl.loggers.wandb.WandbLogger(name=f"wfnet_opt_{trial.number}", save_dir=LOGDIR, project='surfbreak', log_model=True)
 
     #tb_logger = pl.loggers.TensorBoardLogger(LOGDIR+'/', name="opt_v2")
     metrics_callback = MetricsCallback()     # Simple callback that saves metrics from each validation step.
@@ -40,25 +40,25 @@ def objective(trial):
         squared_slowness=trial.suggest_uniform('squared_slowness', 1.0, 2.0), #1.0,
         learning_rate=2e-4,
         wavefunc_loss_scale=trial.suggest_loguniform('wavefunc_loss_scale', 1e-11, 1e-9), #1e-9,
-        wavespeed_norm_loss_scale=trial.suggest_loguniform('wavespeed_norm_loss_scale', 1e-10, 1e-9), #1e-12,
+        wavespeed_norm_loss_scale=trial.suggest_loguniform('wavespeed_norm_loss_scale', 1e-8, 1e-5), #1e-12,
         wavespeed_delta_loss_scale=trial.suggest_loguniform('wavespeed_delta_loss_scale', 1e-8, 1e-5),
         wavespeed_first_omega_0=trial.suggest_uniform('ws_fo0', 2.0,3.0), #0.5
         wavespeed_hidden_omega_0=trial.suggest_uniform('ws_ho0',2.0,3.0), #2.0
         wfloss_growth_scale=trial.suggest_loguniform('wfloss_growth_scale', 1.1, 2.0),
-        pretrain_epochs=trial.suggest_int('pretrain_epochs',2,4)
+        pretrain_epochs=trial.suggest_int('pretrain_epochs',4,4)
     )
 
     # Train consists of 4-second chunks with a 1-second gap between each
-    txy_train = WavefrontDatasetTXYC(training_video, timerange=(start_s,start_s+duration_s), 
+    txy_train = CachedDataset(WavefrontDatasetTXYC, training_video, timerange=(start_s,start_s+duration_s), 
                                                     time_chunk_duration_s=3, time_chunk_stride_s=4, 
                                                     wavecnn_ckpt=cnn_checkpoint)
-    wf_train_dataset = CachedDataset(MaskedWavefrontBatchesNC, txy_train, samples_per_batch=600, included_time_fraction=1.0)
+    wf_train_dataset = MaskedWavefrontBatchesNC(txy_train, samples_per_batch=600, included_time_fraction=1.0)
     
     # Validation covers last few seconds if the waveform, plus next few seconds (ability to extrapolate is desireable)
-    txy_valid = WavefrontDatasetTXYC(training_video, timerange=(start_s+2,start_s+duration_s), 
+    txy_valid = CachedDataset(WavefrontDatasetTXYC, training_video, timerange=(start_s+2,start_s+duration_s), 
                                                     time_chunk_duration_s=2, time_chunk_stride_s=4, 
                                                     wavecnn_ckpt=cnn_checkpoint)
-    wf_valid_dataset = CachedDataset(MaskedWavefrontBatchesNC, txy_valid, samples_per_batch=600, included_time_fraction=0.25)
+    wf_valid_dataset = MaskedWavefrontBatchesNC(txy_valid, samples_per_batch=600, included_time_fraction=0.25)
     
     # Visualize the last 25s of the waveform, plus the 5 seconds of validation-only data 
     viz_inftxy_dataset = WavefrontDatasetTXYC(training_video, timerange=(start_s+duration_s-25,start_s+duration_s+5), 

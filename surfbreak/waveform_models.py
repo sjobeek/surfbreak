@@ -61,7 +61,7 @@ class WaveformNet(pl.LightningModule):    # With no gradient or wave loss, oemeg
         self.squared_slowness = squared_slowness
         self.wavefunc_loss_scale=wavefunc_loss_scale
         self.wfloss_growth_scale= wfloss_growth_scale
-        self.wavespeed_loss_scale=wavespeed_norm_loss_scale
+        self.wavespeed_norm_loss_scale=wavespeed_norm_loss_scale
         self.wf_train_dataset = train_dataset
         self.wf_valid_dataset = valid_dataset
         self.viz_dataset = viz_dataset
@@ -127,7 +127,7 @@ class WaveformNet(pl.LightningModule):    # With no gradient or wave loss, oemeg
             'train/wavefunc_loss': wavefunc_loss,
             'train/wavespeed_norm_loss': wavespeed_norm_loss,
             'train/wavespeed_delta_loss': wavespeed_delta_loss,
-            'train/included_time_fraction': self.wf_train_dataset.included_time_fraction
+            #'train/included_time_fraction': self.wf_train_dataset.included_time_fraction
         } 
         return {'loss': train_loss, 'log': log_dict}
 
@@ -183,15 +183,13 @@ class WaveformNet(pl.LightningModule):    # With no gradient or wave loss, oemeg
     def on_epoch_end(self):
         # Add 10% of time samples to the current training batch each epoch
         self.prev_slowness_model = copy.deepcopy(self.slowness_model)
-        self.wf_train_dataset.included_time_fraction = min(1.0, self.wf_train_dataset.included_time_fraction + 0.1)
-        self.wavefunc_loss_scale *= self.wfloss_growth_scale
+        #self.wf_train_dataset.included_time_fraction = min(1.0, self.wf_train_dataset.included_time_fraction + 0.1)
+        if self.current_epoch >= self.pretrain_epochs:
+            self.wavefunc_loss_scale *= self.wfloss_growth_scale
         wandb.log({'train/wavefunc_loss_scale': self.wavefunc_loss_scale}, commit=False)
 
     def configure_optimizers(self):
-        if self.wavespeed_loss_scale not in [None, 0, 0.]:
-            return Adam(itertools.chain(self.model.parameters(), self.slowness_model.parameters()), lr=self.learning_rate)
-        else:
-            return Adam(self.model.parameters(), lr=self.learning_rate)
+        return Adam(itertools.chain(self.model.parameters(), self.slowness_model.parameters()), lr=self.learning_rate)
     
     def setup(self, stage):        
         assert self.wf_valid_dataset is not None and self.wf_train_dataset is not None, "Default datasets not yet imlemented"
