@@ -12,6 +12,7 @@ import torch.nn.functional as F
 from torch.optim import Adam
 import torch.utils.data
 from surfbreak import train_utils
+import wandb
 
 import optuna
 from optuna.integration import PyTorchLightningPruningCallback
@@ -25,7 +26,7 @@ from surfbreak.loss_functions import wave_pml_2
 
 class WaveformNet(pl.LightningModule):    # With no gradient or wave loss, oemega values of (1, 5) work well (best at epochs 3~5)  
     def __init__(self, hidden_features=256, hidden_layers=3, first_omega_0=2.5, hidden_omega_0=11, squared_slowness=0.2,
-                 learning_rate=1e-4, wavefunc_loss_scale=5.5e-9, wavespeed_loss_scale=4e-4, 
+                 learning_rate=1e-4, wavefunc_loss_scale=5.5e-9, wfloss_growth_scale=1.0, wavespeed_loss_scale=4e-4, 
                  wavespeed_first_omega_0=3.5, wavespeed_hidden_omega_0=15, 
                  video_filepath=None, train_dataset=None, valid_dataset=None, viz_dataset=None, batch_size=64):
         """Learns a low-dimensional function which maps t,x,y video coordinates to waveform magnitude. 
@@ -36,7 +37,7 @@ class WaveformNet(pl.LightningModule):    # With no gradient or wave loss, oemeg
         super().__init__()
         if video_filepath is None:
             assert train_dataset is not None and valid_dataset is not None, "Either a video_filepath or datasets must be provided."
-        self.save_hyperparameters('first_omega_0', 'hidden_omega_0', 'squared_slowness', 'wavefunc_loss_scale', 'wavespeed_loss_scale',
+        self.save_hyperparameters('first_omega_0', 'hidden_omega_0', 'squared_slowness', 'wavefunc_loss_scale', 'wfloss_growth_scale', 'wavespeed_loss_scale',
                                   'hidden_features', 'hidden_layers', 'learning_rate', 'batch_size',
                                   'wavespeed_first_omega_0', 'wavespeed_hidden_omega_0')
         self.model = base_models.Siren(in_features=3, 
@@ -57,6 +58,7 @@ class WaveformNet(pl.LightningModule):    # With no gradient or wave loss, oemeg
         self.learning_rate=learning_rate
         self.squared_slowness = squared_slowness
         self.wavefunc_loss_scale=wavefunc_loss_scale
+        self.wfloss_growth_scale= wfloss_growth_scale
         self.wavespeed_loss_scale=wavespeed_loss_scale
         self.wf_train_dataset = train_dataset
         self.wf_valid_dataset = valid_dataset
@@ -79,7 +81,7 @@ class WaveformNet(pl.LightningModule):    # With no gradient or wave loss, oemeg
         mse_loss = F.mse_loss(wf_values_out, ground_truth['wavefront_values_sc'])
         # Enforce zero mean amplitude at each time (=each batch), not just over the entire x,y,t video cube!
         avg_loss = (wf_values_out**2).mean(dim=1).sum() * 1e-6 # Gentle pressure to have zero amplitude at each timestep.
-        tensorboard_logs = {'train/mse_loss':mse_loss,
+        log_dict = {'train/mse_loss':mse_loss,
                             'train/avg_loss':avg_loss}
 
         ## Calculate the loss used to jointly learn the wave velocity field (if learning it - )
@@ -94,21 +96,22 @@ class WaveformNet(pl.LightningModule):    # With no gradient or wave loss, oemeg
             #TODO: Add in an (optional) loss term that encourages smooth, low-frequency wavespeed fields 
             #grad_loss    =  diff_operators.gradient(slow_vals_out, slow_coords_out).abs().mean()*self.grad_loss_scale
             #laplace_loss =  diff_operators.laplace(slow_vals_out, slow_coords_out).abs().mean()*self.grad_loss_scale*0.1
-            #tensorboard_logs['train/ws_grad_loss'] = grad_loss
-            #tensorboard_logs['train/ws_laplace_loss'] = laplace_loss
-            tensorboard_logs['train/wavespeed_loss'] = wavespeed_loss
+            #log_dict['train/ws_grad_loss'] = grad_loss
+            #log_dict['train/ws_laplace_loss'] = laplace_loss
+            log_dict['train/wavespeed_loss'] = wavespeed_loss
             assert squared_slowness_tensor.shape == coords_out.shape
 
         # Calculate the physics-based wave function loss
         wave_loss_dict = wave_pml_2(wf_values_out, coords_out, squared_slowness_tensor)
         wavefunc_loss = wave_loss_dict['diff_constraint_hom']*self.wavefunc_loss_scale # * min(1, (step/ total_steps)**2)
-        tensorboard_logs['train/wavefunc_loss'] = wavefunc_loss
+        log_dict['train/wavefunc_loss'] = wavefunc_loss
 
+        #TODO: Refactor such that each forward pass doesn't require 2x the computation (due to one call per optimizer)
         if optimizer_idx==0:
             train_loss = mse_loss + avg_loss + wavefunc_loss
-            tensorboard_logs['train/loss'] = train_loss
-            tensorboard_logs['train/included_time_fraction'] = self.wf_train_dataset.included_time_fraction 
-            return {'loss': train_loss, 'log': tensorboard_logs}
+            log_dict['train/loss'] = train_loss
+            log_dict['train/included_time_fraction'] = self.wf_train_dataset.included_time_fraction 
+            return {'loss': train_loss, 'log': log_dict}
         else:
             return {'loss': wavefunc_loss + wavespeed_loss}
 
@@ -117,11 +120,10 @@ class WaveformNet(pl.LightningModule):    # With no gradient or wave loss, oemeg
         model_input, ground_truth = batch
         wf_values_out, _ = self.model(model_input['coords_sc'])
         if batch_nb < 5:
-            self.logger.experiment.add_histogram('val/tcoords', model_input['coords_sc'][...,0], self.current_epoch)
-            self.logger.experiment.add_histogram('val/xcoords', model_input['coords_sc'][...,1], self.current_epoch)
-            self.logger.experiment.add_histogram('val/ycoords', model_input['coords_sc'][...,2], self.current_epoch)
-            self.logger.experiment.add_histogram('val/wf_values_out', wf_values_out, self.current_epoch)
-
+            wandb.log({"diagnostics/tcoords": wandb.Histogram(model_input['coords_sc'][...,0].cpu())})
+            wandb.log({"diagnostics/xcoords": wandb.Histogram(model_input['coords_sc'][...,1].cpu())})
+            wandb.log({"diagnostics/ycoords": wandb.Histogram(model_input['coords_sc'][...,2].cpu())})
+            wandb.log({"diagnostics/wf_values_out": wandb.Histogram(wf_values_out.cpu())}) 
         loss = F.mse_loss(wf_values_out, ground_truth['wavefront_values_sc'])
         return {'val_loss':loss}
 
@@ -138,7 +140,7 @@ class WaveformNet(pl.LightningModule):    # With no gradient or wave loss, oemeg
             wavefronts_txy = ground_truth['wavefronts_txy'].cuda() 
             first_video_image_xy = ground_truth['video_txy'][0].cuda() # First batch, first image
             fig0 = train_utils.plot_waveform_tensors(self.model, coords_txyc, wavefronts_txy, first_video_image_xy)
-            self.logger.experiment.add_figure(f'valchunk0/waveforms', fig0, self.current_epoch)
+            wandb.log({"waveforms": fig0})
             self.val_fig = fig0
 
             # Squared slowness estimate is independent of batch, so only calculate this once
@@ -152,21 +154,23 @@ class WaveformNet(pl.LightningModule):    # With no gradient or wave loss, oemeg
                     plt.colorbar(img, fraction=0.046, pad=0.15, orientation='horizontal')
                 else:
                     plt.colorbar(img, fraction=0.046, pad=0.04, orientation='vertical')
-                self.logger.experiment.add_figure('squared_slowness', fig2, self.current_epoch)
+                wandb.log({"squared_slowness": fig2})
                 self.slowness_model.cuda()
         avg_loss = sum(x["val_loss"] for x in outputs) / len(outputs)
         # Pass the accuracy to the `DictLogger` via the `'log'` key.
-        tensorboard_logs = {'val/avg_loss': avg_loss}
-        return {"val_loss": avg_loss, "log":tensorboard_logs}
+        log_dict = {'val/avg_loss': avg_loss}
+        return {"val_loss": avg_loss, "log":log_dict}
 
     def on_epoch_end(self):
         # Add 10% of time samples to the current training batch each epoch
         self.wf_train_dataset.included_time_fraction = min(1.0, self.wf_train_dataset.included_time_fraction + 0.1)
+        self.wavefunc_loss_scale *= self.wfloss_growth_scale
+        wandb.log({'train/wavefunc_loss_scale': self.wavefunc_loss_scale})
 
     def configure_optimizers(self):
         if self.wavespeed_loss_scale not in [None, 0, 0.]:
             waveform_model_opt = Adam(self.model.parameters(),          lr=self.learning_rate)
-            slowness_model_opt = Adam(self.slowness_model.parameters(), lr=self.learning_rate*0.1)
+            slowness_model_opt = Adam(self.slowness_model.parameters(), lr=self.learning_rate*0.05)
             return [waveform_model_opt, slowness_model_opt]
         else:
             return Adam(self.model.parameters(), lr=self.learning_rate)
@@ -222,10 +226,10 @@ class LitWaveCNN(pl.LightningModule):
         zeromean_loss = wf_values_out.mean()**2 * 0.01
         loss = mse_loss + zeromean_loss
 
-        tensorboard_logs = {'train/loss':loss,
+        log_dict = {'train/loss':loss,
                             'train/mse_loss': mse_loss,
                             'train/avg_loss': zeromean_loss}
-        return {'loss': loss, 'log': tensorboard_logs}
+        return {'loss': loss, 'log': log_dict}
 
     def validation_step(self, batch, batch_nb):
         model_input, ground_truth = batch
@@ -235,8 +239,8 @@ class LitWaveCNN(pl.LightningModule):
 
     def validation_epoch_end(self, outputs):
         avg_loss = sum(x["val_loss"] for x in outputs) / len(outputs)
-        tensorboard_logs = {'val/avg_loss': avg_loss}
-        return {"val_loss": avg_loss, "log":tensorboard_logs}
+        log_dict = {'val/avg_loss': avg_loss}
+        return {"val_loss": avg_loss, "log":log_dict}
 
     def configure_optimizers(self):
         return Adam(self.model.parameters(), lr=self.learning_rate)
