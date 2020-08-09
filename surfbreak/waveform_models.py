@@ -2,6 +2,7 @@ import os
 import pkg_resources
 import shutil
 import itertools
+import copy
 
 import matplotlib.pyplot as plt
 
@@ -26,8 +27,8 @@ from surfbreak.loss_functions import wave_pml_2
 
 class WaveformNet(pl.LightningModule):    # With no gradient or wave loss, oemega values of (1, 5) work well (best at epochs 3~5)  
     def __init__(self, hidden_features=256, hidden_layers=3, first_omega_0=2.5, hidden_omega_0=11, squared_slowness=0.2,
-                 learning_rate=1e-4, wavefunc_loss_scale=5.5e-9, wfloss_growth_scale=1.0, wavespeed_loss_scale=4e-4, 
-                 wavespeed_first_omega_0=3.5, wavespeed_hidden_omega_0=15, 
+                 learning_rate=1e-4, wavefunc_loss_scale=5.5e-9, wfloss_growth_scale=1.0, wavespeed_norm_loss_scale=4e-4, wavespeed_delta_loss_scale=1e-6, 
+                 wavespeed_first_omega_0=3.5, wavespeed_hidden_omega_0=15, pretrain_epochs=3, 
                  video_filepath=None, train_dataset=None, valid_dataset=None, viz_dataset=None, batch_size=64):
         """Learns a low-dimensional function which maps t,x,y video coordinates to waveform magnitude. 
            The model applies a physics-based waveform cost function to regularize the signal, using a 2nd-order PDE (see the SIREN paper).
@@ -37,8 +38,9 @@ class WaveformNet(pl.LightningModule):    # With no gradient or wave loss, oemeg
         super().__init__()
         if video_filepath is None:
             assert train_dataset is not None and valid_dataset is not None, "Either a video_filepath or datasets must be provided."
-        self.save_hyperparameters('first_omega_0', 'hidden_omega_0', 'squared_slowness', 'wavefunc_loss_scale', 'wfloss_growth_scale', 'wavespeed_loss_scale',
-                                  'hidden_features', 'hidden_layers', 'learning_rate', 'batch_size',
+        self.save_hyperparameters('first_omega_0', 'hidden_omega_0', 'squared_slowness', 'wavefunc_loss_scale', 'wfloss_growth_scale',
+                                  'wavespeed_norm_loss_scale', 'wavespeed_delta_loss_scale',
+                                  'hidden_features', 'hidden_layers', 'learning_rate', 'batch_size', 'pretrain_epochs',
                                   'wavespeed_first_omega_0', 'wavespeed_hidden_omega_0')
         self.model = base_models.Siren(in_features=3, 
                                  out_features=1, 
@@ -46,20 +48,20 @@ class WaveformNet(pl.LightningModule):    # With no gradient or wave loss, oemeg
                                  hidden_layers=hidden_layers, outermost_linear=True,
                                  first_omega_0=first_omega_0,
                                  hidden_omega_0=hidden_omega_0)
-        if wavespeed_loss_scale not in [None, 0, 0.]:
-            self.slowness_model = base_models.Siren(in_features=2,     
-                                            out_features=1, 
-                                            hidden_features=64,
-                                            hidden_layers=2, outermost_linear=True,
-                                            first_omega_0=wavespeed_first_omega_0, #1.5
-                                            hidden_omega_0=wavespeed_hidden_omega_0, #10.
-                                            softmax_output=True) # Prevent negative or zero squared slowness values from ruining the physics
+
+        self.slowness_model = base_models.Siren(in_features=2,     
+                                        out_features=1, 
+                                        hidden_features=64,
+                                        hidden_layers=2, outermost_linear=True,
+                                        first_omega_0=wavespeed_first_omega_0, #1.5
+                                        hidden_omega_0=wavespeed_hidden_omega_0, #10.
+                                        softmax_output=True) # Prevent negative or zero squared slowness values from ruining the physics
 
         self.learning_rate=learning_rate
         self.squared_slowness = squared_slowness
         self.wavefunc_loss_scale=wavefunc_loss_scale
         self.wfloss_growth_scale= wfloss_growth_scale
-        self.wavespeed_loss_scale=wavespeed_loss_scale
+        self.wavespeed_loss_scale=wavespeed_norm_loss_scale
         self.wf_train_dataset = train_dataset
         self.wf_valid_dataset = valid_dataset
         self.viz_dataset = viz_dataset
@@ -67,67 +69,81 @@ class WaveformNet(pl.LightningModule):    # With no gradient or wave loss, oemeg
         self.batch_size = batch_size
         self.inferred_slowness=None
         self.val_fig=None
+        self.best_val_loss=None
+        self.pretrain_epochs=pretrain_epochs
+        self.wavespeed_delta_loss_scale = wavespeed_delta_loss_scale
+        self.prev_slowness_model = None # Copy of last epoch's model so that rapid changes to output can be penalized
 
         self.example_input_array = torch.ones(1,1337,3)
 
     def forward(self, data):
         return self.model(data)
 
-    def training_step(self, batch, batch_nb, optimizer_idx):
+    def training_step(self, batch, batch_nb):
         model_input, ground_truth = batch
         wf_values_out, coords_out = self.model(model_input['coords_sc'])
-        
+
+         ####### Primary waveform (space-time) loss calculations ########
         ## Calculate the basic mean squared error loss using the training data
         mse_loss = F.mse_loss(wf_values_out, ground_truth['wavefront_values_sc'])
         # Enforce zero mean amplitude at each time (=each batch), not just over the entire x,y,t video cube!
-        avg_loss = (wf_values_out**2).mean(dim=1).sum() * 1e-6 # Gentle pressure to have zero amplitude at each timestep.
-        log_dict = {'train/mse_loss':mse_loss,
-                            'train/avg_loss':avg_loss}
+        avg_wfval_loss = (wf_values_out**2).mean(dim=1).sum() * 1e-6 # Gentle pressure to have zero amplitude at each timestep.
+        
 
-        ## Calculate the loss used to jointly learn the wave velocity field (if learning it - )
-        if self.wavespeed_loss_scale in [None, 0, 0.]:
-            squared_slowness_tensor = torch.ones_like(coords_out) * self.squared_slowness
-            wavespeed_loss = 0
+        ####### wavespeed (spatial) loss functions  ########
+        ## Calculate the loss used to jointly learn the wave velocity field 
+        slow_vals_out, _ = self.slowness_model(model_input['coords_sc'][...,1:]) # Omit the first channel (time)
+        slow_vals_out_tensor = slow_vals_out.repeat(1,1,3)
+        # Gently push towards known a good value for squared_slowness
+        wavespeed_norm_loss =  (slow_vals_out - self.squared_slowness).abs().mean()*self.wavespeed_norm_loss_scale
+
+        if self.prev_slowness_model is not None:
+            prev_slow_vals_out, _ = self.prev_slowness_model(model_input['coords_sc'][...,1:]) # Omit the first channel (time)
+            wavespeed_delta_loss = F.mse_loss(slow_vals_out, prev_slow_vals_out.detach())*self.wavespeed_delta_loss_scale # Penalize large changes from last epoch's model
         else:
-            slow_vals_out, slow_coords_out = self.slowness_model(model_input['coords_sc'][...,1:]) # Omit the first channel (time)
-            squared_slowness_tensor = slow_vals_out.repeat(1,1,3)
-            # Gently push towards known a good value for squared_slowness
-            wavespeed_loss =  (slow_vals_out - self.squared_slowness).abs().mean()*self.wavespeed_loss_scale
-            #TODO: Add in an (optional) loss term that encourages smooth, low-frequency wavespeed fields 
-            #grad_loss    =  diff_operators.gradient(slow_vals_out, slow_coords_out).abs().mean()*self.grad_loss_scale
-            #laplace_loss =  diff_operators.laplace(slow_vals_out, slow_coords_out).abs().mean()*self.grad_loss_scale*0.1
-            #log_dict['train/ws_grad_loss'] = grad_loss
-            #log_dict['train/ws_laplace_loss'] = laplace_loss
-            log_dict['train/wavespeed_loss'] = wavespeed_loss
-            assert squared_slowness_tensor.shape == coords_out.shape
+            wavespeed_delta_loss = 0
 
-        # Calculate the physics-based wave function loss
-        wave_loss_dict = wave_pml_2(wf_values_out, coords_out, squared_slowness_tensor)
-        wavefunc_loss = wave_loss_dict['diff_constraint_hom']*self.wavefunc_loss_scale # * min(1, (step/ total_steps)**2)
-        log_dict['train/wavefunc_loss'] = wavefunc_loss
-
-        #TODO: Refactor such that each forward pass doesn't require 2x the computation (due to one call per optimizer)
-        if optimizer_idx==0:
-            train_loss = mse_loss + avg_loss + wavefunc_loss
-            log_dict['train/loss'] = train_loss
-            log_dict['train/included_time_fraction'] = self.wf_train_dataset.included_time_fraction 
-            return {'loss': train_loss, 'log': log_dict}
+        ###### wavefunction normalization (slow!) for learning wave field and regularizing waveform ########
+        if self.current_epoch >= self.pretrain_epochs:
+            squared_slowness_tensor = slow_vals_out_tensor
+            # Calculate the physics-based wave function loss
+            wave_loss_dict = wave_pml_2(wf_values_out, coords_out, squared_slowness_tensor)
+            wavefunc_loss = wave_loss_dict['diff_constraint_hom']*self.wavefunc_loss_scale # * min(1, (step/ total_steps)**2)
         else:
-            return {'loss': wavefunc_loss + wavespeed_loss}
+            wavefunc_loss = 0
 
+        #TODO: Add in an (optional) loss term that encourages a smooth, low-frequency wavespeed spatial field 
+        #grad_loss    =  diff_operators.gradient(slow_vals_out, slow_coords_out).abs().mean()*self.grad_loss_scale
+        #laplace_loss =  diff_operators.laplace(slow_vals_out, slow_coords_out).abs().mean()*self.grad_loss_scale*0.1
+        #log_dict['train/ws_grad_loss'] = grad_loss
+        #log_dict['train/ws_laplace_loss'] = laplace_loss
+       
+        train_loss = mse_loss + avg_wfval_loss + wavefunc_loss + wavespeed_norm_loss + wavespeed_delta_loss
+
+        log_dict = {
+            'train/loss': train_loss,
+            'train/mse_loss': mse_loss,
+            'train/avg_wfval_loss': avg_wfval_loss,
+            'train/wavefunc_loss': wavefunc_loss,
+            'train/wavespeed_norm_loss': wavespeed_norm_loss,
+            'train/wavespeed_delta_loss': wavespeed_delta_loss,
+            'train/included_time_fraction': self.wf_train_dataset.included_time_fraction
+        } 
+        return {'loss': train_loss, 'log': log_dict}
 
     def validation_step(self, batch, batch_nb):
         model_input, ground_truth = batch
         wf_values_out, _ = self.model(model_input['coords_sc'])
         if batch_nb < 5:
-            wandb.log({"diagnostics/tcoords": wandb.Histogram(model_input['coords_sc'][...,0].cpu())})
-            wandb.log({"diagnostics/xcoords": wandb.Histogram(model_input['coords_sc'][...,1].cpu())})
-            wandb.log({"diagnostics/ycoords": wandb.Histogram(model_input['coords_sc'][...,2].cpu())})
-            wandb.log({"diagnostics/wf_values_out": wandb.Histogram(wf_values_out.cpu())}) 
+            wandb.log({"diagnostics/tcoords": wandb.Histogram(model_input['coords_sc'][...,0].cpu())}, commit=False)
+            wandb.log({"diagnostics/xcoords": wandb.Histogram(model_input['coords_sc'][...,1].cpu())}, commit=False)
+            wandb.log({"diagnostics/ycoords": wandb.Histogram(model_input['coords_sc'][...,2].cpu())}, commit=False)
+            wandb.log({"diagnostics/wf_values_out": wandb.Histogram(wf_values_out.cpu())}, commit=False) 
         loss = F.mse_loss(wf_values_out, ground_truth['wavefront_values_sc'])
         return {'val_loss':loss}
 
     def validation_epoch_end(self, outputs):
+        log_dict = {}
         if self.viz_dataset is not None:
             model_input, ground_truth = self.viz_dataset[0]
 
@@ -140,48 +156,46 @@ class WaveformNet(pl.LightningModule):    # With no gradient or wave loss, oemeg
             wavefronts_txy = ground_truth['wavefronts_txy'].cuda() 
             first_video_image_xy = ground_truth['video_txy'][0].cuda() # First batch, first image
             fig0 = train_utils.plot_waveform_tensors(self.model, coords_txyc, wavefronts_txy, first_video_image_xy)
-            wandb.log({"waveforms": fig0})
+            log_dict["waveforms"] = fig0
             self.val_fig = fig0
 
             # Squared slowness estimate is independent of batch, so only calculate this once
-            if self.wavespeed_loss_scale not in [None, 0, 0.]:
-                # Calcuate and plot the inferred squared_slowness field in x and y
-                img_aspect = coords_txyc.shape[2]/coords_txyc.shape[3]
-                fig2 = plt.figure(figsize=(10,5))
-                img = plt.imshow(slow_vals_array.T)
-                plt.title('Squared slowness estimate')
-                if img_aspect > 1:
-                    plt.colorbar(img, fraction=0.046, pad=0.15, orientation='horizontal')
-                else:
-                    plt.colorbar(img, fraction=0.046, pad=0.04, orientation='vertical')
-                wandb.log({"squared_slowness": fig2})
-                self.slowness_model.cuda()
+            # Calcuate and plot the inferred squared_slowness field in x and y
+            img_aspect = coords_txyc.shape[2]/coords_txyc.shape[3]
+            fig2 = plt.figure(figsize=(10,5))
+            img = plt.imshow(slow_vals_array.T)
+            plt.title('Squared slowness estimate')
+            if img_aspect > 1:
+                plt.colorbar(img, fraction=0.046, pad=0.15, orientation='horizontal')
+            else:
+                plt.colorbar(img, fraction=0.046, pad=0.04, orientation='vertical')
+            log_dict["squared_slowness"] = fig2
+            self.slowness_model.cuda()
         avg_loss = sum(x["val_loss"] for x in outputs) / len(outputs)
+        plt.close('all') 
         # Pass the accuracy to the `DictLogger` via the `'log'` key.
-        log_dict = {'val/avg_loss': avg_loss}
+        log_dict['val/avg_loss'] = avg_loss
+        if self.best_val_loss is None or avg_loss < self.best_val_loss:
+            self.best_val_loss = avg_loss
+            wandb.run.summary["best_val_loss"] = self.best_val_loss
         return {"val_loss": avg_loss, "log":log_dict}
 
     def on_epoch_end(self):
         # Add 10% of time samples to the current training batch each epoch
+        self.prev_slowness_model = copy.deepcopy(self.slowness_model)
         self.wf_train_dataset.included_time_fraction = min(1.0, self.wf_train_dataset.included_time_fraction + 0.1)
         self.wavefunc_loss_scale *= self.wfloss_growth_scale
-        wandb.log({'train/wavefunc_loss_scale': self.wavefunc_loss_scale})
+        wandb.log({'train/wavefunc_loss_scale': self.wavefunc_loss_scale}, commit=False)
 
     def configure_optimizers(self):
         if self.wavespeed_loss_scale not in [None, 0, 0.]:
-            waveform_model_opt = Adam(self.model.parameters(),          lr=self.learning_rate)
-            slowness_model_opt = Adam(self.slowness_model.parameters(), lr=self.learning_rate*0.05)
-            return [waveform_model_opt, slowness_model_opt]
+            return Adam(itertools.chain(self.model.parameters(), self.slowness_model.parameters()), lr=self.learning_rate)
         else:
             return Adam(self.model.parameters(), lr=self.learning_rate)
     
     def setup(self, stage):        
-        if self.wf_valid_dataset is None:
-            self.wf_valid_dataset = WavefrontSupervisionDataset(self.video_filepath)
+        assert self.wf_valid_dataset is not None and self.wf_train_dataset is not None, "Default datasets not yet imlemented"
         
-        if self.wf_train_dataset is None:
-            self.wf_train_dataset = MaskedWavefrontDataset(self.wf_valid_dataset)
-
     def train_dataloader(self):
                                            # Shuffling is handled by the chunk_dataset when sample_fraction < 1.0
         return torch.utils.data.DataLoader(self.wf_train_dataset, batch_size=self.batch_size, shuffle=True, num_workers=6)
